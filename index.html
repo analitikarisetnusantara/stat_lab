@@ -1,0 +1,5180 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>StatLab — Asisten Analisis Penelitian</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script type="module">
+  import { initializeApp }   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import { getDatabase, ref, set, get, serverTimestamp }
+    from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey:            "AIzaSyCNlXCjTWkXyTc4eVvNkcXkB36i3xJ53xg",
+    authDomain:        "stat-lab-6b89f.firebaseapp.com",
+    databaseURL:       "https://stat-lab-6b89f-default-rtdb.asia-southeast1.firebasedatabase.app",
+    projectId:         "stat-lab-6b89f",
+    storageBucket:     "stat-lab-6b89f.firebasestorage.app",
+    messagingSenderId: "884592520446",
+    appId:             "1:884592520446:web:35a0c76dd355d1eb7d49af"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db  = getDatabase(app);
+
+  let SID = localStorage.getItem('statlab_sid');
+  if (!SID) {
+    SID = 'u_' + Date.now() + '_' + Math.random().toString(36).slice(2,8);
+    localStorage.setItem('statlab_sid', SID);
+  }
+
+  window._fb = { db, ref, set, get, serverTimestamp, SID };
+
+  setInterval(() => { if (window._fbAutoSave) window._fbAutoSave(); }, 30000);
+
+  window.addEventListener('load', () => {
+    setTimeout(() => { if (window.restoreSession) restoreSession(); }, 800);
+  });
+</script>
+<script>
+function $(id) { return document.getElementById(id); }
+
+// ── Null-safe classList helper ──
+function addClass(id, cls)    { const e=$( id); if(e) e.classList.add(cls); }
+function removeClass(id, cls) { const e=$(id); if(e) e.classList.remove(cls); }
+function hasClass(id, cls)    { const e=$(id); return e ? e.classList.contains(cls) : false; }
+function showEl(id)  { const e=$(id); if(e) e.style.display='block'; }
+function hideEl(id)  { const e=$(id); if(e) e.style.display='none'; }
+function setHTML(id, html) { const e=$(id); if(e) e.innerHTML=html; }
+function setText(id, txt)  { const e=$(id); if(e) e.textContent=txt; }
+
+// ═══════════════════════════════════════════════════
+//  SPRINT 2 — VALIDITAS & RELIABILITAS
+// ═══════════════════════════════════════════════════
+
+const s2 = {
+  konstruks: [],   // [{id, name, items:[colName,...]}]
+  results:   [],
+};
+let konstrukCounter = 0;
+
+// ── Navigate to Step 2 ──
+function goToStep2() {
+  // Populate info
+  $('s2-col-count').textContent = state.headers.length;
+  $('s2-row-count').textContent = state.rows.length;
+
+  // Hide sec-upload, show sec-validitas
+  removeClass('sec-upload','active');
+  addClass('sec-validitas','active');
+  setStep(2);
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+
+  // Add first konstruk if empty
+  if (s2.konstruks.length === 0) addKonstruk();
+
+  // Save session
+  saveSession();
+}
+
+function backToStep1() {
+  removeClass('sec-validitas','active');
+  addClass('sec-upload','active');
+  setStep(1);
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// ── Session persistence (sessionStorage) ──
+function saveSession() {
+  try {
+    sessionStorage.setItem('statlab_headers', JSON.stringify(state.headers));
+    sessionStorage.setItem('statlab_rows',    JSON.stringify(state.rows));
+    sessionStorage.setItem('statlab_colmeta', JSON.stringify(state.colMeta));
+  } catch(e) {}
+}
+
+// ── Add konstruk ──
+function addKonstruk() {
+  konstrukCounter++;
+  const id = 'k_' + konstrukCounter;
+  s2.konstruks.push({ id, name: '', items: [] });
+  renderKonstrukList();
+  validateRunButton();
+}
+
+function removeKonstruk(id) {
+  s2.konstruks = s2.konstruks.filter(k => k.id !== id);
+  renderKonstrukList();
+  validateRunButton();
+}
+
+function updateKonstrukName(id, name) {
+  const k = s2.konstruks.find(x => x.id === id);
+  if (k) k.name = name.trim();
+  validateRunButton();
+}
+
+function toggleItem(konstrukId, colName) {
+  const k = s2.konstruks.find(x => x.id === konstrukId);
+  if (!k) return;
+  // Remove from other konstruks
+  s2.konstruks.forEach(kk => {
+    if (kk.id !== konstrukId) kk.items = kk.items.filter(i => i !== colName);
+  });
+  // Toggle in this konstruk
+  const idx = k.items.indexOf(colName);
+  if (idx === -1) k.items.push(colName);
+  else k.items.splice(idx, 1);
+  renderKonstrukList();
+  validateRunButton();
+}
+
+function getUsedItems(exceptId) {
+  const used = new Set();
+  s2.konstruks.forEach(k => {
+    if (k.id !== exceptId) k.items.forEach(i => used.add(i));
+  });
+  return used;
+}
+
+function renderKonstrukList() {
+  const list = $('konstruk-list');
+  if (!s2.konstruks.length) {
+    list.innerHTML = '';
+    return;
+  }
+
+  // Filter: only show columns that look like they could be items
+  // (numeric or mix, exclude obvious ID/name columns)
+  const candidateCols = state.headers.filter(h => {
+    const meta = state.colMeta.find(c => c.name === h);
+    if (!meta) return true;
+    // Exclude text-only columns with many unique values (likely names/IDs)
+    if (meta.type === 'str' && meta.uniqueCount > 20) return false;
+    return true;
+  });
+
+  list.innerHTML = s2.konstruks.map((k, ki) => {
+    const usedElsewhere = getUsedItems(k.id);
+    const chips = candidateCols.map(col => {
+      const isSelected = k.items.includes(col);
+      const isUsed     = usedElsewhere.has(col);
+      const cls = isUsed ? 'used-elsewhere' : isSelected ? 'selected' : '';
+      const onclick = isUsed ? '' : `onclick="toggleItem('${k.id}','${escJs(col)}')"`;
+      return `<div class="item-chip ${cls}" ${onclick} title="${escHtml(col)}">${escHtml(col.length > 18 ? col.slice(0,16)+'…' : col)}</div>`;
+    }).join('');
+
+    return `
+    <div class="konstruk-card" id="kcard_${k.id}">
+      <div class="konstruk-head">
+        <div class="konstruk-num">${ki + 1}</div>
+        <input class="konstruk-name-input"
+          placeholder="Nama konstruk (mis. Motivasi Kerja)"
+          value="${escHtml(k.name)}"
+          oninput="updateKonstrukName('${k.id}', this.value)"
+        >
+        <span class="chip" style="flex-shrink:0;">${k.items.length} item</span>
+        <button class="konstruk-del" onclick="removeKonstruk('${k.id}')" title="Hapus konstruk">✕</button>
+      </div>
+      <div class="konstruk-body">
+        <div class="item-pool-label">Pilih item yang mengukur konstruk ini:</div>
+        <div class="item-checkgrid">${chips}</div>
+        ${k.items.length > 0 && k.items.length < 3
+          ? `<div style="margin-top:10px;font-size:12px;color:var(--yellow);">⚠ Minimal 3 item direkomendasikan untuk Cronbach's Alpha yang stabil.</div>`
+          : ''
+        }
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function validateRunButton() {
+  const btn = $('btn-run-validitas');
+  const valid = s2.konstruks.length > 0
+    && s2.konstruks.every(k => k.name.length > 0 && k.items.length >= 2);
+  btn.disabled = !valid;
+}
+
+function escJs(s) { if(!s && s!==0) return ''; return String(s).replace(/\\/g,'\\\\').replace(/'/g,'&#39;').replace(/"/g,'&quot;'); }
+
+// ── Core Statistics ──
+function pearsonR(x, y) {
+  const n  = x.length;
+  if (n < 2) return 0;
+  const mx = x.reduce((a,b)=>a+b,0)/n;
+  const my = y.reduce((a,b)=>a+b,0)/n;
+  const num = x.reduce((s,v,i) => s + (v-mx)*(y[i]-my), 0);
+  const d1  = Math.sqrt(x.reduce((s,v) => s + (v-mx)**2, 0));
+  const d2  = Math.sqrt(y.reduce((s,v) => s + (v-my)**2, 0));
+  if (!d1 || !d2) return 0;
+  return num / (d1 * d2);
+}
+
+function cronbachAlpha(matrix) {
+  // matrix: array of arrays [items x respondents]
+  const k = matrix.length;
+  if (k < 2) return null;
+  const n = matrix[0].length;
+  if (n < 3) return null;
+
+  const itemVars = matrix.map(item => {
+    const m = item.reduce((a,b)=>a+b,0)/n;
+    return item.reduce((s,v) => s + (v-m)**2, 0) / (n-1);
+  });
+
+  const totals = Array(n).fill(0);
+  matrix.forEach(item => item.forEach((v,i) => totals[i] += v));
+  const mt = totals.reduce((a,b)=>a+b,0)/n;
+  const totalVar = totals.reduce((s,v) => s + (v-mt)**2, 0) / (n-1);
+
+  const sumItemVar = itemVars.reduce((a,b)=>a+b,0);
+  if (totalVar === 0) return null;
+  return (k/(k-1)) * (1 - sumItemVar/totalVar);
+}
+
+function alphaIfDeleted(matrix, deleteIdx) {
+  const reduced = matrix.filter((_,i) => i !== deleteIdx);
+  return cronbachAlpha(reduced);
+}
+
+// ── Run Validitas Engine ──
+function runValiditas() {
+  const results = [];
+
+  s2.konstruks.forEach(k => {
+    // Build numeric matrix [items][respondents]
+    const itemData = k.items.map(col => {
+      return state.rows
+        .map(r => parseFloat(r[col]))
+        .filter((v,i,arr) => !isNaN(v));  // get valid rows per item
+    });
+
+    // Use rows where ALL items are numeric
+    const validRowIndices = state.rows.reduce((arr, row, ri) => {
+      const allNum = k.items.every(col => !isNaN(parseFloat(row[col])));
+      if (allNum) arr.push(ri);
+      return arr;
+    }, []);
+
+    const matrix = k.items.map(col =>
+      validRowIndices.map(ri => parseFloat(state.rows[ri][col]))
+    );
+
+    const n = validRowIndices.length;
+
+    // Item-total correlation (standard: correlate with total of ALL items)
+    // This matches SPSS default and most textbook methods
+    const allTotals = Array(n).fill(0);
+    matrix.forEach(item => item.forEach((v,i) => allTotals[i] += v));
+
+    const itemResults = k.items.map((col, ci) => {
+      const itemVals = matrix[ci];
+      // Standard item-total: correlate with total including self
+      const r = pearsonR(itemVals, allTotals);
+
+      const alpha_if_del = alphaIfDeleted(matrix, ci);
+
+      let status;
+      if (r >= 0.3) status = 'valid';
+      else if (r >= 0.2) status = 'border';
+      else status = 'invalid';
+
+      return { col, r: +r.toFixed(4), status, alpha_if_del: alpha_if_del !== null ? +alpha_if_del.toFixed(4) : null };
+    });
+
+    // Scale consistency check — warn if items have very different scales
+    let scaleWarning = null;
+    if (matrix.length >= 2) {
+      const itemMeans = matrix.map(item => item.reduce((a,b)=>a+b,0)/item.length);
+      const maxMean   = Math.max(...itemMeans);
+      const minMean   = Math.min(...itemMeans);
+      if (maxMean > 0 && maxMean / Math.max(minMean, 0.01) > 5) {
+        scaleWarning = 'Skala pengukuran antar item sangat berbeda (rasio mean maks/min = '
+          + (maxMean/Math.max(minMean,0.01)).toFixed(1)
+          + 'x). Pastikan item-item ini berasal dari instrumen yang sama (mis. skala Likert yang seragam).';
+      }
+    }
+
+    // Cronbach's Alpha
+    const alpha = cronbachAlpha(matrix);
+    let alphaStatus;
+    if (alpha === null) alphaStatus = 'insufficient';
+    else if (alpha >= 0.9) alphaStatus = 'excellent';
+    else if (alpha >= 0.7) alphaStatus = 'good';
+    else if (alpha >= 0.6) alphaStatus = 'acceptable';
+    else alphaStatus = 'poor';
+
+    // Items to review
+    const invalidItems  = itemResults.filter(i => i.status === 'invalid');
+    const borderItems   = itemResults.filter(i => i.status === 'border');
+    const validItems    = itemResults.filter(i => i.status === 'valid');
+
+    // Check if deleting invalid items improves alpha
+    const alphaAfterClean = invalidItems.length > 0
+      ? cronbachAlpha(matrix.filter((_,ci) => itemResults[ci].status !== 'invalid'))
+      : null;
+
+    results.push({
+      id: k.id,
+      name: k.name,
+      itemCount: k.items.length,
+      validN: n,
+      itemResults,
+      alpha: alpha !== null ? +alpha.toFixed(4) : null,
+      alphaStatus,
+      invalidItems,
+      borderItems,
+      validItems,
+      alphaAfterClean: alphaAfterClean !== null ? +alphaAfterClean.toFixed(4) : null,
+    });
+  });
+
+  s2.results = results;
+  renderValiditasResult(results);
+}
+
+// ── Render hasil ──
+function renderValiditasResult(results) {
+  const container = $('validitas-result');
+  container.style.display = 'block';
+
+  const totalKonstruk   = results.length;
+  const lolosAll        = results.filter(r => r.invalidItems.length === 0 && r.alphaStatus !== 'poor' && r.alphaStatus !== 'insufficient');
+  const adaMasalah      = results.filter(r => r.invalidItems.length > 0 || r.alphaStatus === 'poor');
+  const totalInvalid    = results.reduce((s,r) => s + r.invalidItems.length, 0);
+
+  let html = `
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon ${adaMasalah.length > 0 ? 'yellow' : 'green'}">
+        ${adaMasalah.length > 0 ? '🔬' : '✅'}
+      </div>
+      <div>
+        <div class="card-title">Hasil Uji Validitas &amp; Reliabilitas</div>
+        <div class="card-subtitle">${totalKonstruk} konstruk diuji · ${totalInvalid} item tidak valid ditemukan</div>
+      </div>
+    </div>
+
+    <div class="summary-strip">
+      <div class="sum-badge ok">✅ <span class="sum-num">${lolosAll.length}</span> Konstruk lolos semua</div>
+      ${adaMasalah.length > 0 ? `<div class="sum-badge warning">⚠️ <span class="sum-num">${adaMasalah.length}</span> Perlu perhatian</div>` : ''}
+      ${totalInvalid > 0 ? `<div class="sum-badge fatal">🔴 <span class="sum-num">${totalInvalid}</span> Item tidak valid</div>` : ''}
+    </div>
+  `;
+
+  results.forEach(r => {
+    const alphaColor = r.alphaStatus === 'excellent' || r.alphaStatus === 'good' ? 'good'
+                     : r.alphaStatus === 'acceptable' ? 'warn' : 'bad';
+    const alphaLabel = {
+      excellent: 'Sangat Baik (≥0.9)',
+      good:      'Baik (0.7–0.89)',
+      acceptable:'Cukup (0.6–0.69)',
+      poor:      'Tidak Reliabel (<0.6)',
+      insufficient: 'Tidak cukup item',
+    }[r.alphaStatus] || '—';
+
+    const validPct   = r.itemCount > 0 ? Math.round(r.validItems.length / r.itemCount * 100) : 0;
+    const validColor = validPct === 100 ? 'good' : validPct >= 70 ? 'warn' : 'bad';
+
+    html += `
+    <div class="konstruk-result">
+      <div class="konstruk-result-head">
+        <div class="konstruk-result-name">
+          <span>${escHtml(r.name)}</span>
+          <span class="chip">${r.itemCount} item · n=${r.validN}</span>
+        </div>
+        <div class="konstruk-result-badges">
+          <span class="metric-badge ${validColor}">Validitas ${validPct}%</span>
+          <span class="metric-badge ${alphaColor}">α = ${r.alpha !== null ? r.alpha : '—'}</span>
+          <span class="metric-badge info">${alphaLabel}</span>
+        </div>
+      </div>
+
+      <!-- Item validity table -->
+      <div style="overflow-x:auto;">
+        <table class="validity-table">
+          <thead>
+            <tr>
+              <th>Item (Kolom)</th>
+              <th>r hitung</th>
+              <th>r tabel*</th>
+              <th>Status</th>
+              <th>Alpha jika item dihapus</th>
+              <th>Rekomendasi</th>
+            </tr>
+          </thead>
+          <tbody>
+    `;
+
+    const rTable = r.validN >= 100 ? 0.195
+                 : r.validN >= 60  ? 0.254
+                 : r.validN >= 40  ? 0.312
+                 : r.validN >= 30  ? 0.361
+                 : r.validN >= 20  ? 0.444
+                 : 0.514;
+
+    r.itemResults.forEach(item => {
+      const rColor = item.r >= 0.5 ? '#22c55e' : item.r >= 0.3 ? '#60a5fa' : item.r >= 0.2 ? '#f59e0b' : '#ef4444';
+      const barW   = Math.max(0, Math.min(100, item.r * 100));
+
+      const statusEl = item.status === 'valid'
+        ? `<span class="valid-dot valid">✓ Valid</span>`
+        : item.status === 'border'
+        ? `<span class="valid-dot border">~ Borderline</span>`
+        : `<span class="valid-dot invalid">✕ Tidak Valid</span>`;
+
+      let alfaDiff = '—';
+      let alfaColor = 'var(--text2)';
+      if (item.alpha_if_del !== null && r.alpha !== null) {
+        const diff = item.alpha_if_del - r.alpha;
+        alfaDiff = item.alpha_if_del.toFixed(4) + (diff > 0.005 ? ` <span style="color:var(--green);font-size:11px;">(+${diff.toFixed(3)})</span>`
+                                                  : diff < -0.005 ? ` <span style="color:var(--red);font-size:11px;">(${diff.toFixed(3)})</span>`
+                                                  : '');
+      }
+
+      let rekomendasi = '';
+      if (item.status === 'invalid') {
+        if (item.alpha_if_del !== null && r.alpha !== null && item.alpha_if_del > r.alpha + 0.01) {
+          rekomendasi = `<span style="color:var(--yellow);font-size:12px;">⚠ Pertimbangkan dihapus — meningkatkan α</span>`;
+        } else {
+          rekomendasi = `<span style="color:var(--red);font-size:12px;">✕ Tidak valid — periksa kembali item ini</span>`;
+        }
+      } else if (item.status === 'border') {
+        rekomendasi = `<span style="color:var(--yellow);font-size:12px;">~ Gunakan dengan kehati-hatian</span>`;
+      } else {
+        rekomendasi = `<span style="color:var(--green);font-size:12px;">✓ Pertahankan</span>`;
+      }
+
+      html += `
+        <tr>
+          <td style="font-family:var(--mono);font-weight:500;">${escHtml(item.col)}</td>
+          <td>
+            <div class="r-bar-wrap">
+              <div class="r-bar-track">
+                <div class="r-bar-fill" style="width:${barW}%;background:${rColor}"></div>
+              </div>
+              <span class="r-val" style="color:${rColor}">${item.r.toFixed(3)}</span>
+            </div>
+          </td>
+          <td style="font-family:var(--mono);font-size:12px;color:var(--text2);">${rTable.toFixed(3)}</td>
+          <td>${statusEl}</td>
+          <td style="font-family:var(--mono);font-size:12px;">${alfaDiff}</td>
+          <td>${rekomendasi}</td>
+        </tr>`;
+    });
+
+    html += `</tbody></table></div>`;
+
+    // Alpha gauge
+    const alphaW  = r.alpha !== null ? Math.max(0, Math.min(100, r.alpha * 100)) : 0;
+    const alphaFill = r.alphaStatus === 'excellent' || r.alphaStatus === 'good' ? 'var(--green)'
+                    : r.alphaStatus === 'acceptable' ? 'var(--yellow)' : 'var(--red)';
+
+    html += `
+      <div class="alpha-gauge-wrap">
+        <div class="alpha-label">Cronbach's Alpha</div>
+        <div style="flex:1;">
+          <div class="alpha-gauge-track">
+            <div class="alpha-gauge-fill" style="width:${alphaW}%;background:${alphaFill}"></div>
+          </div>
+          <div class="alpha-gauge-markers">
+            <span class="alpha-marker" style="left:60%">0.6</span>
+            <span class="alpha-marker" style="left:70%">0.7</span>
+            <span class="alpha-marker" style="left:90%">0.9</span>
+          </div>
+        </div>
+        <div class="alpha-value" style="color:${alphaFill}">${r.alpha !== null ? r.alpha : 'N/A'}</div>
+      </div>
+    `;
+
+    // Insight box
+    let insightMsg = '';
+    let insightCls = '';
+
+    // Show scale warning first if present
+    if (scaleWarning) {
+      insightMsg += '<div style="color:var(--yellow);margin-bottom:8px;">⚠️ <strong>Perhatian skala:</strong> ' + scaleWarning + '</div>';
+    }
+
+    if (r.invalidItems.length === 0 && r.alphaStatus !== 'poor') {
+      insightCls = 'ok-box';
+      insightMsg = `<strong>Semua ${r.itemCount} item valid</strong> dan konstruk ini reliabel (α = ${r.alpha}). Konstruk <em>${escHtml(r.name)}</em> siap digunakan dalam analisis utama.`;
+    } else {
+      insightCls = 'warn-box';
+      if (r.invalidItems.length > 0) {
+        insightMsg += `<strong>${r.invalidItems.length} item tidak valid</strong> (${r.invalidItems.map(i=>i.col).join(', ')}). `;
+        if (r.alphaAfterClean !== null && r.alphaAfterClean > (r.alpha || 0)) {
+          insightMsg += `Jika item ini dihapus, Alpha meningkat dari <strong>${r.alpha}</strong> menjadi <strong>${r.alphaAfterClean}</strong>. `;
+        }
+        insightMsg += `Keputusan untuk mempertahankan atau menghapus item ini ada di tanganmu — pertimbangkan juga relevansi teoritisnya.`;
+      }
+      if (r.alphaStatus === 'poor') {
+        insightMsg += ` Alpha yang sangat rendah (${r.alpha}) mengindikasikan item-item dalam konstruk ini tidak cukup konsisten mengukur hal yang sama.`;
+      }
+    }
+
+    html += `<div class="insight-box ${insightCls}" style="margin:12px 16px 16px;">${insightMsg}</div>`;
+    html += `</div>`;
+  });
+
+  // ── Acknowledgement gate ──
+  const hasIssues = adaMasalah.length > 0;
+
+  html += `
+  <div style="margin-top:8px;">
+    <div class="card-header" style="margin-bottom:12px;">
+      <div class="card-icon ${hasIssues ? 'yellow' : 'green'}">${hasIssues ? '📝' : '🎯'}</div>
+      <div>
+        <div class="card-title">Pernyataan Sebelum Melanjutkan</div>
+        <div class="card-subtitle">Kamu wajib membaca dan memilih salah satu pernyataan di bawah sebelum dapat melanjutkan ke analisis utama.</div>
+      </div>
+    </div>
+
+    <div class="ack-choices" id="ack-choices">
+  `;
+
+  if (lolosAll.length === totalKonstruk) {
+    html += `
+      <label class="ack-choice" onclick="selectAck(this)">
+        <input type="radio" name="ack" value="clean">
+        <div class="ack-choice-text">✅ Saya telah membaca semua hasil. Semua konstruk lolos validitas dan reliabilitas. Saya siap melanjutkan ke analisis utama.</div>
+      </label>
+    `;
+  }
+
+  if (hasIssues) {
+    html += `
+      <label class="ack-choice" onclick="selectAck(this)">
+        <input type="radio" name="ack" value="fix">
+        <div class="ack-choice-text">🔧 Saya telah membaca semua temuan dan akan memperbaiki instrumen saya, kemudian kembali ke tahap ini untuk menjalankan ulang.</div>
+      </label>
+      <label class="ack-choice" onclick="selectAck(this)">
+        <input type="radio" name="ack" value="proceed_with_note">
+        <div class="ack-choice-text">⚠️ Saya telah membaca semua temuan dan memilih melanjutkan analisis dengan mencatat keterbatasan instrumen dalam laporan penelitian saya.</div>
+      </label>
+    `;
+  }
+
+  html += `
+    </div>
+
+    <div class="gate" style="margin-top:16px;">
+      <div class="gate-text">
+        <div class="gate-title">Lanjutkan ke Analisis Utama</div>
+        <div class="gate-desc">Setelah memilih pernyataan di atas, kamu bisa melanjutkan ke Tahap 3 untuk memilih alat uji dan menjalankan analisis statistik.</div>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <button class="btn btn-ghost btn-sm" onclick="runValiditas()">↺ Ulangi Uji</button>
+        <button class="btn btn-primary" id="btn-go-step3" onclick="goToStep3()" disabled>
+          Lanjut: Analisis Utama →
+        </button>
+      </div>
+    </div>
+  </div>
+  </div>`;
+
+  container.innerHTML = html;
+  container.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function selectAck(el) {
+  document.querySelectorAll('.ack-choice').forEach(c => c.classList.remove('selected'));
+  el.classList.add('selected');
+  const val = el.querySelector('input').value;
+  $('btn-go-step3').disabled = false;
+  if (val === 'fix') $('btn-go-step3').disabled = true;
+}
+
+// goToStep3 moved to Sprint 3 block
+
+
+// ═══════════════════════════════════════════════════
+//  SPRINT 3 — ANALISIS UTAMA
+// ═══════════════════════════════════════════════════
+
+const s3 = {
+  varRoles:     {},   // colName -> 'y'|'x'|'m'|'z'|'none'
+  activeRole:   'y',
+  selectedAlat: null,
+  hasil:        null,
+};
+
+// ── Navigate ──────────────────────────────────────
+function goToStep3() {
+  removeClass('sec-validitas','active');
+  addClass('sec-analisis','active');
+  setStep(3);
+  initVarSelector();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function backToStep2() {
+  removeClass('sec-analisis','active');
+  addClass('sec-validitas','active');
+  setStep(2);
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function backToVarSelector() {
+  $('card-alat-uji').style.display = 'none';
+  $('card-var-selector').style.display = 'block';
+  $('analisis-result').style.display = 'none';
+}
+
+// ── Var Selector ──────────────────────────────────
+function initVarSelector() {
+  // Pre-populate from konstruk results if available
+  if (s2.results.length > 0 && Object.keys(s3.varRoles).length === 0) {
+    s2.results.forEach(r => {
+      // Use konstruk name as pseudo-variable — map to its items
+      state.headers.forEach(h => {
+        if (!s3.varRoles[h]) s3.varRoles[h] = 'none';
+      });
+    });
+  } else {
+    state.headers.forEach(h => {
+      if (!s3.varRoles[h]) s3.varRoles[h] = 'none';
+    });
+  }
+  renderVarGrid();
+}
+
+function setActiveRole(role) {
+  s3.activeRole = role;
+  ['y','x','m','z','none'].forEach(r => {
+    const pill = $('rpill-' + r);
+    if (!pill) return;
+    pill.className = 'role-pill ' + (r === role ? 'active-' + r : 'inactive');
+    if (r === 'none' && role === 'none') pill.className = 'role-pill active-y';
+  });
+}
+
+function toggleVarRole(colName) {
+  const current = s3.varRoles[colName] || 'none';
+  const newRole  = s3.activeRole;
+
+  // Y can only be 1
+  if (newRole === 'y') {
+    Object.keys(s3.varRoles).forEach(k => {
+      if (s3.varRoles[k] === 'y') s3.varRoles[k] = 'none';
+    });
+  }
+  s3.varRoles[colName] = (current === newRole) ? 'none' : newRole;
+  renderVarGrid();
+  updateVarSummary();
+  validateAlatButton();
+}
+
+function renderVarGrid() {
+  const grid = $('var-selector-grid');
+  const ROLE_LABEL = { y:'Y', x:'X', m:'M', z:'Z', none:'' };
+  const ROLE_CLS   = { y:'sel-y', x:'sel-x', m:'sel-m', z:'sel-z', none:'' };
+
+  grid.innerHTML = state.headers.map(h => {
+    const role = s3.varRoles[h] || 'none';
+    const meta = state.colMeta.find(c => c.name === h);
+    const typeTag = meta ? (meta.type === 'num' ? '🔢' : meta.type === 'str' ? '🔤' : '⚠️') : '';
+    const badgeHtml = role !== 'none'
+      ? `<span class="var-badge-role role-${role}">${ROLE_LABEL[role]}</span>` : '';
+
+    return `<div class="var-card ${ROLE_CLS[role]}" onclick="toggleVarRole('${escJs(h)}')">
+      <div class="var-dot"></div>
+      <div class="var-name" title="${escHtml(h)}">${typeTag} ${escHtml(h.length>20?h.slice(0,18)+'…':h)}</div>
+      ${badgeHtml}
+    </div>`;
+  }).join('');
+
+  // Update counts
+  ['y','x','m','z'].forEach(r => {
+    const cnt = Object.values(s3.varRoles).filter(v=>v===r).length;
+    const el = $('cnt-'+r);
+    if (el) el.textContent = cnt;
+  });
+}
+
+function updateVarSummary() {
+  const yVars = getVarsByRole('y');
+  const xVars = getVarsByRole('x');
+  const mVars = getVarsByRole('m');
+
+  const sumEl = $('var-summary');
+  if (!yVars.length && !xVars.length) { sumEl.innerHTML=''; return; }
+
+  sumEl.innerHTML = `<div style="display:flex;gap:10px;flex-wrap:wrap;padding:12px 0;">
+    ${yVars.length?`<div class="chip" style="border-color:var(--red);color:#fca5a5;">Y: ${yVars.map(v=>`<strong>${escHtml(v)}</strong>`).join(', ')}</div>`:''}
+    ${xVars.length?`<div class="chip" style="border-color:var(--teal);color:#5eead4;">X: ${xVars.map(v=>`<strong>${escHtml(v)}</strong>`).join(', ')}</div>`:''}
+    ${mVars.length?`<div class="chip" style="border-color:var(--yellow);color:#fcd34d;">M: ${mVars.map(v=>`<strong>${escHtml(v)}</strong>`).join(', ')}</div>`:''}
+  </div>`;
+}
+
+function getVarsByRole(role) {
+  return Object.entries(s3.varRoles).filter(([,r])=>r===role).map(([k])=>k);
+}
+
+function validateAlatButton() {
+  const y = getVarsByRole('y');
+  const x = getVarsByRole('x');
+  $('btn-to-alat').disabled = !(y.length >= 1 && x.length >= 1);
+}
+
+// ── Alat Uji ──────────────────────────────────────
+function showAlatUji() {
+  $('card-var-selector').style.display = 'none';
+  $('card-alat-uji').style.display = 'block';
+  updateVarSummary();
+  renderAlatGrid();
+  window.scrollTo({ top: $('card-alat-uji').offsetTop - 20, behavior:'smooth' });
+}
+
+function getAlatOptions() {
+  const y    = getVarsByRole('y');
+  const x    = getVarsByRole('x');
+  const m    = getVarsByRole('m');
+  const yMeta = state.colMeta.find(c => c.name === y[0]);
+  const yIsNum = yMeta && yMeta.type === 'num';
+
+  const xMetas = x.map(v => state.colMeta.find(c=>c.name===v));
+  const allXNum = xMetas.every(m2 => m2 && m2.type === 'num');
+  const someXCat = xMetas.some(m2 => m2 && (m2.type==='str' || (m2.type==='num' && m2.isLikertCandidate===false && m2.uniqueCount && m2.uniqueCount <= 6)));
+
+  const nX = x.length;
+  const hasM = m.length > 0;
+
+  const alats = [];
+
+  // Regresi Linear Berganda
+  if (yIsNum && nX >= 1 && allXNum) {
+    alats.push({
+      id: 'reg_linear',
+      icon: '📈',
+      name: nX===1 ? 'Regresi Linear Sederhana' : 'Regresi Linear Berganda',
+      desc: `Menganalisis pengaruh ${nX} variabel bebas terhadap ${y[0]}. Menghasilkan koefisien, R², dan uji-F.`,
+      req: `Y numerik · X numerik · n ≥ ${10*nX}`,
+      recommended: !hasM && yIsNum && allXNum,
+      available: true,
+    });
+  }
+
+  // Moderasi
+  if (yIsNum && nX >= 1 && hasM && allXNum) {
+    alats.push({
+      id: 'moderasi',
+      icon: '🔀',
+      name: 'Analisis Moderasi',
+      desc: `Menguji apakah variabel M memperkuat atau memperlemah pengaruh X terhadap Y melalui interaction term.`,
+      req: `Y numerik · X numerik · M numerik`,
+      recommended: hasM,
+      available: true,
+    });
+  }
+
+  // Korelasi
+  if (yIsNum && nX === 1 && allXNum) {
+    alats.push({
+      id: 'korelasi',
+      icon: '🔗',
+      name: 'Korelasi Pearson / Spearman',
+      desc: `Mengukur kekuatan dan arah hubungan antara dua variabel numerik. Pearson untuk data normal, Spearman untuk non-normal.`,
+      req: `Y numerik · 1 X numerik`,
+      recommended: false,
+      available: true,
+    });
+  }
+
+  // Uji-t Independen
+  if (yIsNum && nX === 1 && someXCat) {
+    alats.push({
+      id: 'ttest_ind',
+      icon: '⚖️',
+      name: 'Uji-t Independen (Independent t-test)',
+      desc: `Membandingkan rata-rata Y antara dua kelompok yang berbeda berdasarkan variabel X kategorik.`,
+      req: `Y numerik · X kategorik (2 kelompok)`,
+      recommended: someXCat && !yIsNum===false,
+      available: someXCat,
+    });
+  }
+
+  // ANOVA
+  if (yIsNum && nX === 1 && someXCat) {
+    alats.push({
+      id: 'anova',
+      icon: '📊',
+      name: 'One-Way ANOVA',
+      desc: `Membandingkan rata-rata Y antara 3 atau lebih kelompok. Dilanjutkan post-hoc test jika signifikan.`,
+      req: `Y numerik · X kategorik (≥3 kelompok)`,
+      recommended: false,
+      available: someXCat,
+    });
+  }
+
+  // Regresi Logistik
+  if (!yIsNum && nX >= 1) {
+    alats.push({
+      id: 'reg_logistik',
+      icon: '🎲',
+      name: 'Regresi Logistik Biner',
+      desc: `Y merupakan variabel kategorik (0/1 atau dua kategori). Menganalisis probabilitas kejadian berdasarkan X.`,
+      req: `Y kategorik (2 kelas) · X numerik`,
+      recommended: !yIsNum,
+      available: true,
+    });
+  }
+
+  return alats;
+}
+
+function renderAlatGrid() {
+  const alats = getAlatOptions();
+  const yVars = getVarsByRole('y');
+  const xVars = getVarsByRole('x');
+  const mVars = getVarsByRole('m');
+
+  $('alat-subtitle').textContent =
+    `Y: ${yVars.join(', ')} · X: ${xVars.join(', ')}${mVars.length?' · M: '+mVars.join(', '):''}`;
+
+  $('alat-grid').innerHTML = alats.map(a => `
+    <div class="alat-card ${a.recommended?'recommended':''} ${!a.available?'disabled-card':''} ${s3.selectedAlat===a.id?'selected':''}"
+         id="alat_${a.id}" onclick="selectAlat('${a.id}')">
+      <div class="alat-check">${s3.selectedAlat===a.id?'✓':''}</div>
+      <div class="alat-icon">${a.icon}</div>
+      <div class="alat-name">${a.name}</div>
+      <div class="alat-desc">${a.desc}</div>
+      <div class="alat-req">${a.req}</div>
+    </div>
+  `).join('') || '<div style="color:var(--text2);font-size:13px;padding:12px;">Tidak ada alat uji yang sesuai dengan kombinasi variabel ini. Coba ubah peran variabel.</div>';
+
+  // Auto-select recommended
+  if (!s3.selectedAlat) {
+    const rec = alats.find(a => a.recommended && a.available);
+    if (rec) { s3.selectedAlat = rec.id; renderAlatGrid(); return; }
+  }
+  $('btn-run-analisis').disabled = !s3.selectedAlat;
+}
+
+function selectAlat(id) {
+  s3.selectedAlat = id;
+  renderAlatGrid();
+  $('btn-run-analisis').disabled = false;
+}
+
+// ═══════════════════════════════════════════════════
+//  ANALISIS ENGINE
+// ═══════════════════════════════════════════════════
+
+// ── Math helpers ──────────────────────────────────
+function mean(arr)   { return arr.reduce((a,b)=>a+b,0)/arr.length; }
+function variance(arr, m) {
+  const mu = m !== undefined ? m : mean(arr);
+  return arr.reduce((s,v)=>s+(v-mu)**2,0)/(arr.length-1);
+}
+function stddev(arr)  { return Math.sqrt(variance(arr)); }
+function sum(arr)     { return arr.reduce((a,b)=>a+b,0); }
+
+function getNumericPairs(colY, colsX) {
+  const pairs = [];
+  state.rows.forEach(row => {
+    const yVal = parseFloat(row[colY]);
+    const xVals = colsX.map(c => parseFloat(row[c]));
+    if (!isNaN(yVal) && xVals.every(v=>!isNaN(v))) {
+      pairs.push({ y: yVal, xs: xVals });
+    }
+  });
+  return pairs;
+}
+
+// ── OLS Regression ─────────────────────────────────
+// Returns {beta, se, tstat, pval, r2, adjR2, fstat, fpval, residuals, fitted, n, k}
+function olsRegression(y, X) {
+  // X includes intercept column already
+  const n = y.length;
+  const k = X[0].length; // number of params including intercept
+
+  // XtX and Xty
+  function matMul(A, B) {
+    const rows=A.length, cols=B[0].length, inner=B.length;
+    return Array.from({length:rows},(_,i)=>
+      Array.from({length:cols},(_,j)=>
+        Array.from({length:inner},(_,l)=>A[i][l]*B[l][j]).reduce((a,b)=>a+b,0)));
+  }
+  function matInv(m) {
+    const n=m.length;
+    const aug=m.map((r,i)=>[...r,...Array.from({length:n},(_,j)=>i===j?1:0)]);
+    for(let i=0;i<n;i++){
+      let max=i;
+      for(let j=i+1;j<n;j++) if(Math.abs(aug[j][i])>Math.abs(aug[max][i])) max=j;
+      [aug[i],aug[max]]=[aug[max],aug[i]];
+      const piv=aug[i][i];
+      if(Math.abs(piv)<1e-12) return null;
+      for(let j=0;j<2*n;j++) aug[i][j]/=piv;
+      for(let j=0;j<n;j++) if(j!==i){ const f=aug[j][i]; for(let l=0;l<2*n;l++) aug[j][l]-=f*aug[i][l]; }
+    }
+    return aug.map(r=>r.slice(n));
+  }
+
+  const Xt = X[0].map((_,ci)=>X.map(r=>r[ci]));
+  const XtX = matMul(Xt,X);
+  const XtXinv = matInv(XtX);
+  if (!XtXinv) return null;
+  const Xty = Xt.map(row=>row.reduce((s,v,i)=>s+v*y[i],0));
+  const beta = XtXinv.map(row=>row.reduce((s,v,i)=>s+v*Xty[i],0));
+
+  const fitted   = X.map(row=>row.reduce((s,v,i)=>s+v*beta[i],0));
+  const residuals= y.map((v,i)=>v-fitted[i]);
+  const sse      = residuals.reduce((s,v)=>s+v**2,0);
+  const sst      = y.reduce((s,v)=>s+(v-mean(y))**2,0);
+  const ssr      = sst - sse;
+  const r2       = sst===0 ? 0 : 1 - sse/sst;
+  const adjR2    = 1 - (1-r2)*(n-1)/(n-k);
+  const mse      = sse/(n-k);
+  const se       = XtXinv.map((row,i)=>Math.sqrt(Math.max(0,row[i]*mse)));
+  const tstat    = beta.map((b,i)=>se[i]===0?0:b/se[i]);
+  const pval     = tstat.map(t=>2*(1-tDistCDF(Math.abs(t),n-k)));
+  const fstat    = (ssr/(k-1))/(sse/(n-k));
+  const fpval    = 1 - fDistCDF(fstat, k-1, n-k);
+
+  return { beta, se, tstat, pval, r2, adjR2, fstat, fpval, residuals, fitted, n, k, mse };
+}
+
+// ── t-distribution CDF (approximation) ────────────
+function tDistCDF(t, df) {
+  // Abramowitz & Stegun approximation
+  const x = df/(df+t*t);
+  return 1 - 0.5*incompleteBeta(x, df/2, 0.5);
+}
+function incompleteBeta(x, a, b) {
+  if (x<0||x>1) return 0;
+  if (x===0) return 0;
+  if (x===1) return 1;
+  const lbeta = lgamma(a)+lgamma(b)-lgamma(a+b);
+  const front = Math.exp(Math.log(x)*a+Math.log(1-x)*b-lbeta)/a;
+  return front * betaCF(x,a,b);
+}
+function betaCF(x,a,b) {
+  const MAXIT=200, EPS=3e-7;
+  let qab=a+b, qap=a+1, qam=a-1;
+  let c=1, d=1-qab*x/qap; if(Math.abs(d)<1e-30) d=1e-30; d=1/d;
+  let h=d;
+  for(let m=1;m<=MAXIT;m++){
+    let aa=m*(b-m)*x/((qam+2*m)*(a+2*m));
+    d=1+aa*d; if(Math.abs(d)<1e-30)d=1e-30; c=1+aa/c; if(Math.abs(c)<1e-30)c=1e-30;
+    d=1/d; h*=d*c;
+    aa=-(a+m)*(qab+m)*x/((a+2*m)*(qap+2*m));
+    d=1+aa*d; if(Math.abs(d)<1e-30)d=1e-30; c=1+aa/c; if(Math.abs(c)<1e-30)c=1e-30;
+    d=1/d; const del=d*c; h*=del;
+    if(Math.abs(del-1)<EPS) break;
+  }
+  return h;
+}
+function lgamma(z) {
+  const c=[76.18009172947146,-86.50532032941677,24.01409824083091,-1.231739572450155,0.001208650973866179,-5.395239384953e-6];
+  let y=z, x=z, tmp=x+5.5; tmp-=(x+0.5)*Math.log(tmp);
+  let ser=1.000000000190015;
+  for(let j=0;j<6;j++) ser+=c[j]/++y;
+  return -tmp+Math.log(2.5066282746310005*ser/x);
+}
+function fDistCDF(f, d1, d2) {
+  if (f<=0) return 0;
+  const x = d2/(d2+d1*f);
+  return incompleteBeta(x, d2/2, d1/2);
+}
+
+// ── Shapiro-Wilk approximation (for normality) ─────
+function shapiroWilkW(residuals) {
+  // Use D'Agostino K2 as proxy (skewness + kurtosis test)
+  const n = residuals.length;
+  if (n < 8) return { w: null, p: null, label: 'n terlalu kecil' };
+  const m  = mean(residuals);
+  const s  = stddev(residuals);
+  if (s === 0) return { w: 0, p: 0, label: 'Tidak normal (tidak ada variasi)' };
+  const zs = residuals.map(v=>(v-m)/s);
+  const skew = zs.reduce((a,v)=>a+v**3,0)/n;
+  const kurt = zs.reduce((a,v)=>a+v**4,0)/n - 3;
+  // Omnibus K2 stat
+  const k2 = n/6*(skew**2) + n/24*(kurt**2);
+  // p-value from chi-sq df=2 approx
+  const p  = Math.exp(-k2/2);
+  return {
+    stat: +k2.toFixed(4),
+    p: +Math.min(1,Math.max(0,p)).toFixed(4),
+    skew: +skew.toFixed(4),
+    kurt: +kurt.toFixed(4),
+    label: p > 0.05 ? 'Normal' : 'Tidak normal (p < 0.05)',
+    ok: p > 0.05,
+  };
+}
+
+// ── VIF (Multikolinearitas) ────────────────────────
+function computeVIF(pairs, colsX) {
+  if (colsX.length < 2) return colsX.map(()=>({ vif:1, ok:true }));
+  const results = [];
+  colsX.forEach((targetCol, ti) => {
+    const y2  = pairs.map(p=>p.xs[ti]);
+    const Xmat = pairs.map(p=>[1,...p.xs.filter((_,i)=>i!==ti)]);
+    const r2   = olsRegression(y2, Xmat);
+    const vif  = r2 ? 1/(1-r2.r2) : 999;
+    results.push({ col:targetCol, vif:+vif.toFixed(3), ok: vif < 10 });
+  });
+  return results;
+}
+
+// ── Breusch-Pagan (Heteroskedastisitas) ───────────
+function breushPagan(residuals, fitted) {
+  const n    = residuals.length;
+  const u2   = residuals.map(v=>v**2);
+  const Xmat = fitted.map(f=>[1,f]);
+  const bp   = olsRegression(u2, Xmat);
+  if (!bp) return { stat:null, p:null, ok:true, label:'Tidak dapat dihitung' };
+  const chi2 = n * bp.r2;
+  const p    = 1 - fDistCDF(chi2/1, 1, n-2);
+  return {
+    stat: +chi2.toFixed(4),
+    p:    +Math.min(1,Math.max(0,p)).toFixed(4),
+    ok:   p > 0.05,
+    label: p > 0.05 ? 'Homoskedastis (tidak ada masalah)' : 'Heteroskedastis (p < 0.05)',
+  };
+}
+
+// ── Durbin-Watson ─────────────────────────────────
+function durbinWatson(residuals) {
+  let num=0, den=0;
+  for(let i=1;i<residuals.length;i++) num+=(residuals[i]-residuals[i-1])**2;
+  den = residuals.reduce((s,v)=>s+v**2,0);
+  const dw = den===0 ? 2 : num/den;
+  return {
+    dw: +dw.toFixed(4),
+    ok: dw>=1.5 && dw<=2.5,
+    label: dw>=1.5&&dw<=2.5 ? 'Tidak ada autokorelasi' : dw<1.5 ? 'Autokorelasi positif' : 'Autokorelasi negatif',
+  };
+}
+
+// ── Pearson / Spearman Correlation ────────────────
+function spearmanR(x, y) {
+  const n = x.length;
+  const rankOf = arr => {
+    const sorted = [...arr].map((v,i)=>({v,i})).sort((a,b)=>a.v-b.v);
+    const ranks  = Array(n);
+    sorted.forEach((obj,ri)=>{ ranks[obj.i]=ri+1; });
+    return ranks;
+  };
+  return pearsonR(rankOf(x), rankOf(y));
+}
+
+// ── Uji-t Independen ──────────────────────────────
+function independentTTest(group1, group2) {
+  const n1=group1.length, n2=group2.length;
+  const m1=mean(group1), m2=mean(group2);
+  const s1=variance(group1), s2=variance(group2);
+  const se=Math.sqrt(s1/n1+s2/n2);
+  const t=se===0?0:(m1-m2)/se;
+  const df=se===0?1:(s1/n1+s2/n2)**2/((s1/n1)**2/(n1-1)+(s2/n2)**2/(n2-1));
+  const p=2*(1-tDistCDF(Math.abs(t),df));
+  return { t:+t.toFixed(4), df:+df.toFixed(1), p:+p.toFixed(4), m1:+m1.toFixed(4), m2:+m2.toFixed(4), n1, n2 };
+}
+
+// ── ANOVA ─────────────────────────────────────────
+function oneWayANOVA(groups) {
+  const keys   = Object.keys(groups);
+  const allVals= keys.flatMap(k=>groups[k]);
+  const gMean  = mean(allVals);
+  const ssBet  = keys.reduce((s,k)=>s+groups[k].length*(mean(groups[k])-gMean)**2,0);
+  const ssWit  = keys.reduce((s,k)=>s+groups[k].reduce((ss,v)=>ss+(v-mean(groups[k]))**2,0),0);
+  const dfBet  = keys.length-1;
+  const dfWit  = allVals.length-keys.length;
+  const msBet  = ssBet/dfBet;
+  const msWit  = ssWit/dfWit;
+  const f      = msWit===0?0:msBet/msWit;
+  const p      = 1-fDistCDF(f,dfBet,dfWit);
+  return { f:+f.toFixed(4), dfBet, dfWit, p:+p.toFixed(4),
+    groups: keys.map(k=>({ name:k, n:groups[k].length, mean:+mean(groups[k]).toFixed(4), std:+stddev(groups[k]).toFixed(4) })) };
+}
+
+// ═══════════════════════════════════════════════════
+//  MAIN RUNNER
+// ═══════════════════════════════════════════════════
+function runAnalisis() {
+  try {
+  const yCol  = getVarsByRole('y')[0];
+  const xCols = getVarsByRole('x');
+  const mCols = getVarsByRole('m');
+  const alat  = s3.selectedAlat;
+
+  const pairs = getNumericPairs(yCol, xCols);
+  if (pairs.length < 5) {
+    showToast('Data numerik tidak cukup untuk dianalisis. Periksa kembali kolom yang dipilih.','❌'); return;
+  }
+
+  const y    = pairs.map(p=>p.y);
+  const Xraw = pairs.map(p=>p.xs);
+
+  let hasil = { alat, yCol, xCols, mCols, n: pairs.length };
+
+  // ── Regresi Linear ──
+  if (alat === 'reg_linear' || alat === 'moderasi') {
+    let labels = ['Konstanta', ...xCols];
+    let Xmat   = Xraw.map(xs=>[1,...xs]);
+
+    if (alat === 'moderasi' && mCols.length > 0) {
+      const mPairs = getNumericPairs(yCol, [...xCols, ...mCols]);
+      const mY     = mPairs.map(p=>p.y);
+      const mXraw  = mPairs.map(p=>p.xs);
+      // interaction = X * M
+      const mXmat = mXraw.map(xs=>{
+        const baseX = xs.slice(0, xCols.length);
+        const modX  = xs.slice(xCols.length);
+        const interactions = baseX.flatMap(bx=>modX.map(mx=>bx*mx));
+        return [1,...xs,...interactions];
+      });
+      const intLabels = xCols.flatMap(xc=>mCols.map(mc=>`${xc}×${mc}`));
+      labels = ['Konstanta',...xCols,...mCols,...intLabels];
+      Xmat   = mXmat;
+      const mResult = olsRegression(mY, mXmat);
+      if (mResult) { Object.assign(hasil, mResult); hasil.labels=labels; }
+    } else {
+      const reg = olsRegression(y, Xmat);
+      if (reg) { Object.assign(hasil, reg); hasil.labels = labels; }
+    }
+
+    if (hasil.residuals) {
+      const useY = hasil.yHat ? hasil.yHat : y;
+      hasil.asumsi = {
+        normalitas:        shapiroWilkW(hasil.residuals),
+        heteroskedastisitas: breushPagan(hasil.residuals, hasil.fitted),
+        autokorelasi:       durbinWatson(hasil.residuals),
+        vif:                computeVIF(pairs, xCols),
+      };
+    }
+  }
+
+  // ── Korelasi ──
+  if (alat === 'korelasi') {
+    const xCol = xCols[0];
+    const xVals = pairs.map(p=>p.xs[0]);
+    const rP = pearsonR(y, xVals);
+    const rS = spearmanR(y, xVals);
+    const n  = pairs.length;
+    const tP = rP*Math.sqrt((n-2)/(1-rP**2));
+    const pP = 2*(1-tDistCDF(Math.abs(tP),n-2));
+    const tS = rS*Math.sqrt((n-2)/(1-rS**2));
+    const pS = 2*(1-tDistCDF(Math.abs(tS),n-2));
+    hasil = { ...hasil, rPearson:+rP.toFixed(4), rSpearman:+rS.toFixed(4),
+      pPearson:+pP.toFixed(4), pSpearman:+pS.toFixed(4), n };
+  }
+
+  // ── Uji-t Independen ──
+  if (alat === 'ttest_ind') {
+    const xCol  = xCols[0];
+    const groups = {};
+    state.rows.forEach(row => {
+      const yv = parseFloat(row[yCol]);
+      const xv = row[xCol];
+      if (!isNaN(yv) && xv !== null && xv !== '') {
+        if (!groups[xv]) groups[xv] = [];
+        groups[xv].push(yv);
+      }
+    });
+    const keys = Object.keys(groups);
+    if (keys.length === 2) {
+      const tt = independentTTest(groups[keys[0]], groups[keys[1]]);
+      hasil = { ...hasil, ...tt, group1Name:keys[0], group2Name:keys[1] };
+    }
+  }
+
+  // ── ANOVA ──
+  if (alat === 'anova') {
+    const xCol  = xCols[0];
+    const groups = {};
+    state.rows.forEach(row => {
+      const yv = parseFloat(row[yCol]);
+      const xv = row[xCol];
+      if (!isNaN(yv) && xv !== null && xv !== '') {
+        if (!groups[xv]) groups[xv] = [];
+        groups[xv].push(yv);
+      }
+    });
+    const av = oneWayANOVA(groups);
+    hasil = { ...hasil, ...av };
+  }
+
+  s3.hasil = hasil;
+  renderHasil(hasil);
+  } catch(err) {
+    console.error('runAnalisis error:', err);
+    const container = $('analisis-result');
+    if(container) {
+      container.style.display = 'block';
+      container.innerHTML = '<div class="card"><div class="finding fatal"><div class="finding-icon">❌</div><div class="finding-body"><div class="finding-title">Error saat menjalankan analisis</div><div class="finding-desc">'+escHtml(err.message)+'<br><small style="font-family:var(--mono);font-size:11px;color:var(--text3);">'+escHtml(err.stack ? err.stack.split('\n')[1]||'' : '')+'</small></div></div></div></div>';
+    }
+    showToast('Error: ' + err.message, '❌', 5000);
+  }
+}
+
+// ═══════════════════════════════════════════════════
+//  RENDER HASIL
+// ═══════════════════════════════════════════════════
+function pValueLabel(p) {
+  if (p < 0.001) return '<span class="sig-star">*** p < 0.001</span>';
+  if (p < 0.01)  return '<span class="sig-star">** p < 0.01</span>';
+  if (p < 0.05)  return '<span class="sig-star">* p < 0.05</span>';
+  if (p < 0.1)   return '<span style="color:var(--yellow);">† p < 0.10</span>';
+  return `<span class="not-sig">ns (p = ${p})</span>`;
+}
+
+function sigLevel(p) { return p < 0.05 ? 'signifikan' : 'tidak signifikan'; }
+
+function renderHasil(h) {
+  const container = $('analisis-result');
+  if (!container) { console.error('analisis-result element not found'); return; }
+  container.style.display = 'block';
+  let html = '<div class="card">';
+
+  // ── Header ──
+  const alatNames = {
+    reg_linear:'Regresi Linear', moderasi:'Analisis Moderasi',
+    korelasi:'Korelasi', ttest_ind:'Uji-t Independen', anova:'ANOVA', reg_logistik:'Regresi Logistik'
+  };
+  html += `
+    <div class="card-header">
+      <div class="card-icon blue">📊</div>
+      <div>
+        <div class="card-title">Hasil ${alatNames[h.alat]||h.alat}</div>
+        <div class="card-subtitle">Y: <strong>${escHtml(h.yCol)}</strong> · X: <strong>${h.xCols.map(escHtml).join(', ')}</strong> · n = ${h.n}</div>
+      </div>
+    </div>`;
+
+  // ══ ASUMSI KLASIK ══
+  if (h.asumsi) {
+    html += `<div class="result-section"><div class="result-section-title">🔍 Uji Asumsi Klasik</div>`;
+    html += `<div class="asumsi-grid">`;
+
+    // Normalitas
+    const norm = h.asumsi.normalitas;
+    html += `<div class="asumsi-card">
+      <div class="asumsi-head">
+        <span style="font-size:16px;">🔔</span>
+        <span class="asumsi-title">Uji Normalitas Residual</span>
+        <div class="asumsi-status-dot" style="background:${norm.ok?'var(--green)':'var(--red)'}"></div>
+      </div>
+      <div class="asumsi-body">
+        <div class="asumsi-metric" style="color:${norm.ok?'var(--green)':'var(--red)'}">
+          ${norm.stat ?? 'N/A'}
+        </div>
+        <div class="asumsi-label">Statistik K² (Omnibus) · p = ${norm.p ?? '—'}</div>
+        <div class="asumsi-verdict" style="color:${norm.ok?'var(--green)':'var(--yellow)'}">
+          ${norm.ok
+            ? '✅ Residual berdistribusi normal (p > 0.05). Asumsi terpenuhi.'
+            : '⚠️ Residual tidak normal (p < 0.05). Pertimbangkan transformasi data atau uji non-parametrik.'
+          }
+        </div>
+        ${norm.skew!==undefined?`<div style="margin-top:8px;font-size:11px;color:var(--text2);font-family:var(--mono);">Skewness: ${norm.skew} · Kurtosis: ${norm.kurt}</div>`:''}
+      </div>
+    </div>`;
+
+    // Multikolinearitas
+    const maxVIF = h.asumsi.vif.length > 0 ? Math.max(...h.asumsi.vif.map(v=>v.vif)) : 1;
+    const vifOk  = maxVIF < 10;
+    if (h.xCols.length > 1) {
+      html += `<div class="asumsi-card">
+        <div class="asumsi-head">
+          <span style="font-size:16px;">🔗</span>
+          <span class="asumsi-title">Multikolinearitas (VIF)</span>
+          <div class="asumsi-status-dot" style="background:${vifOk?'var(--green)':'var(--red)'}"></div>
+        </div>
+        <div class="asumsi-body">
+          <div class="asumsi-metric" style="color:${vifOk?'var(--green)':'var(--red)'}">
+            VIF maks = ${maxVIF}
+          </div>
+          <div class="asumsi-label">Batas aman: VIF &lt; 10</div>
+          ${h.asumsi.vif.map(v=>`
+            <div style="display:flex;justify-content:space-between;font-size:12px;margin-top:6px;">
+              <span style="font-family:var(--mono);color:var(--text2)">${escHtml(v.col)}</span>
+              <span style="font-family:var(--mono);color:${v.ok?'var(--green)':'var(--red)'};font-weight:600;">${v.vif}</span>
+            </div>`).join('')}
+          <div class="asumsi-verdict" style="margin-top:8px;color:${vifOk?'var(--green)':'var(--red)'}">
+            ${vifOk?'✅ Tidak ada multikolinearitas serius.':'❌ Multikolinearitas terdeteksi. Pertimbangkan menghapus salah satu variabel yang berkorelasi tinggi.'}
+          </div>
+        </div>
+      </div>`;
+    }
+
+    // Heteroskedastisitas
+    const het = h.asumsi.heteroskedastisitas;
+    html += `<div class="asumsi-card">
+      <div class="asumsi-head">
+        <span style="font-size:16px;">📐</span>
+        <span class="asumsi-title">Heteroskedastisitas (Breusch-Pagan)</span>
+        <div class="asumsi-status-dot" style="background:${het.ok?'var(--green)':'var(--yellow)'}"></div>
+      </div>
+      <div class="asumsi-body">
+        <div class="asumsi-metric" style="color:${het.ok?'var(--green)':'var(--yellow)'}">
+          χ² = ${het.stat ?? 'N/A'}
+        </div>
+        <div class="asumsi-label">p = ${het.p ?? '—'}</div>
+        <div class="asumsi-verdict" style="color:${het.ok?'var(--green)':'var(--yellow)'}">
+          ${het.ok
+            ? '✅ Varians residual homogen. Asumsi homoskedastisitas terpenuhi.'
+            : '⚠️ Terdeteksi heteroskedastisitas. Standard error mungkin bias — pertimbangkan robust SE.'
+          }
+        </div>
+      </div>
+    </div>`;
+
+    // Autokorelasi
+    const dw = h.asumsi.autokorelasi;
+    html += `<div class="asumsi-card">
+      <div class="asumsi-head">
+        <span style="font-size:16px;">🔄</span>
+        <span class="asumsi-title">Autokorelasi (Durbin-Watson)</span>
+        <div class="asumsi-status-dot" style="background:${dw.ok?'var(--green)':'var(--yellow)'}"></div>
+      </div>
+      <div class="asumsi-body">
+        <div class="asumsi-metric" style="color:${dw.ok?'var(--green)':'var(--yellow)'}">
+          DW = ${dw.dw}
+        </div>
+        <div class="asumsi-label">Rentang aman: 1.5 – 2.5</div>
+        <div class="asumsi-verdict" style="color:${dw.ok?'var(--green)':'var(--yellow)'}">
+          ${dw.ok
+            ? '✅ Tidak ada autokorelasi yang signifikan.'
+            : `⚠️ ${dw.label}. Relevan terutama untuk data time series.`
+          }
+        </div>
+      </div>
+    </div>`;
+
+    html += `</div></div>`; // asumsi-grid + result-section
+  }
+
+  // ══ HASIL UTAMA ══
+  html += `<div class="result-section"><div class="result-section-title">📈 Hasil Analisis Utama</div>`;
+
+  // ── Regresi Linear ──
+  if ((h.alat === 'reg_linear' || h.alat === 'moderasi') && h.beta) {
+    html += `<div class="model-fit">
+      <div class="fit-metric">
+        <div class="fit-value" style="color:var(--accent)">${(h.r2*100).toFixed(2)}%</div>
+        <div class="fit-label">R² (Koef. Determinasi)</div>
+      </div>
+      <div class="fit-metric">
+        <div class="fit-value" style="color:var(--teal)">${(h.adjR2*100).toFixed(2)}%</div>
+        <div class="fit-label">Adjusted R²</div>
+      </div>
+      <div class="fit-metric">
+        <div class="fit-value" style="color:${h.fpval<0.05?'var(--green)':'var(--red)'}">
+          ${h.fstat.toFixed(3)}
+        </div>
+        <div class="fit-label">F-statistik</div>
+      </div>
+      <div class="fit-metric">
+        <div class="fit-value" style="color:${h.fpval<0.05?'var(--green)':'var(--red)'}">
+          ${h.fpval < 0.001 ? '< 0.001' : h.fpval.toFixed(4)}
+        </div>
+        <div class="fit-label">p-value (F)</div>
+      </div>
+      <div class="fit-metric">
+        <div class="fit-value" style="color:var(--text2)">${h.n}</div>
+        <div class="fit-label">Observasi (n)</div>
+      </div>
+    </div>`;
+
+    html += `<div style="overflow-x:auto;border-radius:10px;border:1px solid var(--border);margin-bottom:16px;">
+      <table class="coef-table">
+        <thead><tr>
+          <th>Variabel</th><th>Koefisien (β)</th><th>Std. Error</th>
+          <th>t-statistik</th><th>p-value</th><th>Signifikansi</th>
+        </tr></thead><tbody>`;
+
+    h.labels.forEach((lbl, i) => {
+      const sig = h.pval[i] < 0.05;
+      html += `<tr>
+        <td style="font-weight:600;">${escHtml(lbl)}</td>
+        <td class="mono" style="color:${h.beta[i]>=0?'var(--green)':'var(--red)'}">
+          ${h.beta[i]>=0?'+':''}${h.beta[i].toFixed(4)}
+        </td>
+        <td class="mono">${h.se[i].toFixed(4)}</td>
+        <td class="mono">${h.tstat[i].toFixed(4)}</td>
+        <td class="mono">${h.pval[i]<0.001?'< 0.001':h.pval[i].toFixed(4)}</td>
+        <td>${pValueLabel(h.pval[i])}</td>
+      </tr>`;
+    });
+    html += `</tbody></table></div>`;
+
+    // Narasi
+    const sigXs  = h.xCols.filter((_,i)=>h.pval[i+1]<0.05);
+    const nsigXs = h.xCols.filter((_,i)=>h.pval[i+1]>=0.05);
+    html += `<div class="narasi-box"><h4>📝 Interpretasi Otomatis</h4>`;
+    html += `<div class="narasi-para">
+      Model regresi secara keseluruhan <span class="narasi-highlight">${h.fpval<0.05?'signifikan':'tidak signifikan'}</span>
+      (F = ${h.fstat.toFixed(3)}, p ${h.fpval<0.001?'< 0.001':'= '+h.fpval.toFixed(4)}).
+      Variabel bebas mampu menjelaskan <span class="narasi-highlight">${(h.r2*100).toFixed(2)}%</span>
+      varians dari <em>${escHtml(h.yCol)}</em> (R² = ${h.r2.toFixed(4)}, Adjusted R² = ${h.adjR2.toFixed(4)}).
+    </div>`;
+
+    if (sigXs.length > 0) {
+      html += `<div class="narasi-para">Variabel yang berpengaruh signifikan terhadap <em>${escHtml(h.yCol)}</em>: `;
+      sigXs.forEach((xc, xi) => {
+        const idx = h.xCols.indexOf(xc)+1;
+        const b   = h.beta[idx];
+        html += `<span class="narasi-highlight">${escHtml(xc)}</span>
+          (β = ${b>=0?'+':''}${b.toFixed(4)}, p ${h.pval[idx]<0.001?'< 0.001':'= '+h.pval[idx].toFixed(4)}).
+          Setiap peningkatan satu satuan ${escHtml(xc)} ${b>0?'meningkatkan':'menurunkan'}
+          ${escHtml(h.yCol)} sebesar ${Math.abs(b).toFixed(4)} satuan.
+          ${xi < sigXs.length-1?'<br>':''}`;
+      });
+      html += `</div>`;
+    }
+
+    if (nsigXs.length > 0) {
+      html += `<div class="narasi-para">Variabel <span class="narasi-highlight" style="background:rgba(239,68,68,.1);color:#fca5a5;">${nsigXs.map(escHtml).join(', ')}</span>
+        tidak berpengaruh signifikan (p ≥ 0.05). Temuan ini perlu didiskusikan dalam konteks teori yang mendasari penelitianmu.</div>`;
+    }
+
+    if (h.alat === 'moderasi') {
+      const intIdx = h.labels.findIndex(l=>l.includes('×'));
+      if (intIdx > -1 && h.pval[intIdx] < 0.05) {
+        html += `<div class="narasi-para">
+          <span class="narasi-highlight">Efek moderasi signifikan</span>
+          (β interaksi = ${h.beta[intIdx]>=0?'+':''}${h.beta[intIdx].toFixed(4)}, p ${h.pval[intIdx]<0.001?'< 0.001':'= '+h.pval[intIdx].toFixed(4)}).
+          Variabel moderator ${escHtml(h.mCols[0])} terbukti ${h.beta[intIdx]>0?'memperkuat':'memperlemah'} pengaruh ${escHtml(h.xCols[0])} terhadap ${escHtml(h.yCol)}.
+        </div>`;
+      } else if (intIdx > -1) {
+        html += `<div class="narasi-para">
+          Efek moderasi <span class="narasi-highlight" style="background:rgba(239,68,68,.1);color:#fca5a5;">tidak signifikan</span>
+          (p = ${h.pval[intIdx].toFixed(4)}). Variabel ${escHtml(h.mCols[0])} tidak terbukti memoderasi hubungan antara ${escHtml(h.xCols[0])} dan ${escHtml(h.yCol)}.
+        </div>`;
+      }
+    }
+
+    html += `</div>`;
+  }
+
+  // ── Korelasi ──
+  if (h.alat === 'korelasi') {
+    const interpPearson = Math.abs(h.rPearson) >= 0.8?'sangat kuat':Math.abs(h.rPearson)>=0.6?'kuat':Math.abs(h.rPearson)>=0.4?'sedang':Math.abs(h.rPearson)>=0.2?'lemah':'sangat lemah';
+    html += `<div class="model-fit">
+      <div class="fit-metric">
+        <div class="fit-value" style="color:${Math.abs(h.rPearson)>=0.5?'var(--green)':'var(--yellow)'}">${h.rPearson}</div>
+        <div class="fit-label">Pearson r</div>
+      </div>
+      <div class="fit-metric">
+        <div class="fit-value" style="color:${h.pPearson<0.05?'var(--green)':'var(--red)'}">
+          ${h.pPearson<0.001?'< 0.001':h.pPearson}</div>
+        <div class="fit-label">p-value Pearson</div>
+      </div>
+      <div class="fit-metric">
+        <div class="fit-value" style="color:${Math.abs(h.rSpearman)>=0.5?'var(--teal)':'var(--yellow)'}">${h.rSpearman}</div>
+        <div class="fit-label">Spearman ρ</div>
+      </div>
+      <div class="fit-metric">
+        <div class="fit-value" style="color:${h.pSpearman<0.05?'var(--green)':'var(--red)'}">
+          ${h.pSpearman<0.001?'< 0.001':h.pSpearman}</div>
+        <div class="fit-label">p-value Spearman</div>
+      </div>
+    </div>
+    <div class="narasi-box"><h4>📝 Interpretasi Otomatis</h4>
+    <div class="narasi-para">
+      Terdapat hubungan <span class="narasi-highlight">${interpPearson} ${h.rPearson>=0?'positif':'negatif'}</span>
+      antara <em>${escHtml(h.xCols[0])}</em> dan <em>${escHtml(h.yCol)}</em>
+      (r = ${h.rPearson}, p ${h.pPearson<0.001?'< 0.001':'= '+h.pPearson}).
+      Hubungan ini <span class="narasi-highlight">${h.pPearson<0.05?'signifikan secara statistik':'tidak signifikan secara statistik'}</span>.
+      Koefisien Spearman (ρ = ${h.rSpearman}) konsisten dengan hasil Pearson, mengindikasikan bahwa temuan ini
+      ${Math.sign(h.rPearson)===Math.sign(h.rSpearman)?'robust terhadap asumsi normalitas':'perlu diinterpretasikan dengan hati-hati'}.
+    </div></div>`;
+  }
+
+  // ── Uji-t ──
+  if (h.alat === 'ttest_ind' && h.t !== undefined) {
+    html += `<div class="model-fit">
+      <div class="fit-metric">
+        <div class="fit-value" style="color:var(--accent)">${h.t}</div>
+        <div class="fit-label">t-statistik</div>
+      </div>
+      <div class="fit-metric">
+        <div class="fit-value" style="color:var(--text2)">${h.df}</div>
+        <div class="fit-label">Derajat bebas</div>
+      </div>
+      <div class="fit-metric">
+        <div class="fit-value" style="color:${h.p<0.05?'var(--green)':'var(--red)'}">
+          ${h.p<0.001?'< 0.001':h.p}</div>
+        <div class="fit-label">p-value</div>
+      </div>
+      <div class="fit-metric">
+        <div class="fit-value" style="color:var(--teal)">${h.m1.toFixed(3)}</div>
+        <div class="fit-label">Mean "${escHtml(h.group1Name)}" (n=${h.n1})</div>
+      </div>
+      <div class="fit-metric">
+        <div class="fit-value" style="color:var(--yellow)">${h.m2.toFixed(3)}</div>
+        <div class="fit-label">Mean "${escHtml(h.group2Name)}" (n=${h.n2})</div>
+      </div>
+    </div>
+    <div class="narasi-box"><h4>📝 Interpretasi Otomatis</h4>
+    <div class="narasi-para">
+      Hasil uji-t independen menunjukkan bahwa rata-rata <em>${escHtml(h.yCol)}</em>
+      pada kelompok <span class="narasi-highlight">${escHtml(h.group1Name)}</span> (M = ${h.m1.toFixed(3)})
+      <span class="narasi-highlight">${h.p<0.05?'berbeda secara signifikan':'tidak berbeda secara signifikan'}</span>
+      dengan kelompok <span class="narasi-highlight">${escHtml(h.group2Name)}</span> (M = ${h.m2.toFixed(3)}),
+      t(${h.df}) = ${h.t}, p ${h.p<0.001?'< 0.001':'= '+h.p}.
+    </div></div>`;
+  }
+
+  // ── ANOVA ──
+  if (h.alat === 'anova' && h.f !== undefined) {
+    html += `<div class="model-fit">
+      <div class="fit-metric">
+        <div class="fit-value" style="color:var(--accent)">${h.f}</div>
+        <div class="fit-label">F-statistik</div>
+      </div>
+      <div class="fit-metric">
+        <div class="fit-value" style="color:${h.p<0.05?'var(--green)':'var(--red)'}">
+          ${h.p<0.001?'< 0.001':h.p}</div>
+        <div class="fit-label">p-value</div>
+      </div>
+      <div class="fit-metric">
+        <div class="fit-value" style="color:var(--text2)">${h.dfBet}</div>
+        <div class="fit-label">df antar kelompok</div>
+      </div>
+      <div class="fit-metric">
+        <div class="fit-value" style="color:var(--text2)">${h.dfWit}</div>
+        <div class="fit-label">df dalam kelompok</div>
+      </div>
+    </div>`;
+    html += `<div style="overflow-x:auto;border-radius:10px;border:1px solid var(--border);margin-bottom:16px;">
+      <table class="coef-table"><thead><tr><th>Kelompok</th><th>n</th><th>Mean</th><th>Std. Dev</th></tr></thead><tbody>`;
+    h.groups.forEach(g=>{
+      html+=`<tr><td style="font-weight:600;">${escHtml(g.name)}</td><td class="mono">${g.n}</td><td class="mono">${g.mean}</td><td class="mono">${g.std}</td></tr>`;
+    });
+    html += `</tbody></table></div>
+    <div class="narasi-box"><h4>📝 Interpretasi Otomatis</h4>
+    <div class="narasi-para">
+      Hasil One-Way ANOVA menunjukkan bahwa terdapat perbedaan rata-rata <em>${escHtml(h.yCol)}</em>
+      yang <span class="narasi-highlight">${h.p<0.05?'signifikan':'tidak signifikan'}</span>
+      antar ${h.groups.length} kelompok
+      (F(${h.dfBet},${h.dfWit}) = ${h.f}, p ${h.p<0.001?'< 0.001':'= '+h.p}).
+      ${h.p<0.05?'Disarankan untuk melanjutkan dengan uji post-hoc (Tukey/Bonferroni) untuk mengetahui pasangan kelompok mana yang berbeda secara spesifik.':'Tidak ada bukti perbedaan yang signifikan antar kelompok.'}
+    </div></div>`;
+  }
+
+  html += `</div>`; // result-section
+
+  // ── Gate Sprint 4 ──
+  html += `
+    <div class="gate" style="margin-top:8px;">
+      <div class="gate-text">
+        <div class="gate-title">✅ Analisis selesai dijalankan</div>
+        <div class="gate-desc">Hasil analisis siap. Lanjutkan ke Tahap 4 untuk mengunduh laporan lengkap dalam format PDF atau Word.</div>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <button class="btn btn-ghost btn-sm" onclick="runAnalisis()">↺ Ulangi Analisis</button>
+        <button class="btn btn-ghost btn-sm" onclick="backToVarSelector()">← Ubah Variabel</button>
+        <button class="btn btn-primary" onclick="goToStep4()">Lanjut: Laporan & Export →</button>
+      </div>
+    </div>
+  </div>`;
+
+  container.innerHTML = html;
+  container.scrollIntoView({ behavior:'smooth', block:'start' });
+}
+
+function goToStep4() {
+  showToast('Sprint 4 (Laporan & Export PDF) segera hadir!', '🚀', 4000);
+}
+
+
+// ═══════════════════════════════════════════════════
+//  SPRINT 4 — LAPORAN & EXPORT
+// ═══════════════════════════════════════════════════
+
+function goToStep4() {
+  removeClass('sec-analisis','active');
+  addClass('sec-laporan','active');
+  setStep(4);
+  buildLaporan();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function backToStep3() {
+  removeClass('sec-laporan','active');
+  addClass('sec-analisis','active');
+  setStep(3);
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function mulaiUlang() {
+  if (!confirm('Mulai analisis baru? Semua data sesi ini akan dihapus.')) return;
+  sessionStorage.clear();
+  location.reload();
+}
+
+function switchLaporan(panel) {
+  document.querySelectorAll('.laporan-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.laporan-nav-btn').forEach(b => b.classList.remove('active'));
+  $('lpanel-' + panel).classList.add('active');
+  $('lnav-'   + panel).classList.add('active');
+}
+
+// ─── Build semua panel ────────────────────────────
+function buildLaporan() {
+  buildRingkasan();
+  buildValidasiPanel();
+  buildNarasiPanel();
+}
+
+// ══ Panel 1: Ringkasan Eksekutif ══════════════════
+function buildRingkasan() {
+  const h = s3.hasil;
+  const container = $('ringkasan-content');
+  const hasData   = state.rows.length > 0;
+  const hasVal    = s2.results.length > 0;
+  const hasHasil  = h !== null;
+
+  // Scorecards
+  const totalFindings = state.findings ? state.findings.length : 0;
+  const fatalCount    = state.findings ? state.findings.filter(f=>f.level==='fatal').length : 0;
+  const totalKonstruk = s2.results.length;
+  const invalidItems  = s2.results.reduce((s,r)=>s+r.invalidItems.length, 0);
+
+  let html = `<div class="scorecard-grid">`;
+
+  html += `<div class="scorecard">
+    <div class="scorecard-icon">📋</div>
+    <div class="scorecard-value" style="color:var(--accent)">${fmtNum(state.rows.length || 0)}</div>
+    <div class="scorecard-label">Total Responden</div>
+    <div class="scorecard-sub">${state.headers.length} kolom</div>
+  </div>`;
+
+  html += `<div class="scorecard">
+    <div class="scorecard-icon">🔍</div>
+    <div class="scorecard-value" style="color:${fatalCount>0?'var(--red)':'var(--green)'}">${fatalCount}</div>
+    <div class="scorecard-label">Temuan Fatal</div>
+    <div class="scorecard-sub">${totalFindings} total temuan diagnostik</div>
+  </div>`;
+
+  html += `<div class="scorecard">
+    <div class="scorecard-icon">🧪</div>
+    <div class="scorecard-value" style="color:${invalidItems>0?'var(--yellow)':'var(--green)'}">${totalKonstruk}</div>
+    <div class="scorecard-label">Konstruk Diuji</div>
+    <div class="scorecard-sub">${invalidItems} item tidak valid</div>
+  </div>`;
+
+  if (hasHasil) {
+    if (h.r2 !== undefined) {
+      html += `<div class="scorecard">
+        <div class="scorecard-icon">📈</div>
+        <div class="scorecard-value" style="color:var(--teal)">${(h.r2*100).toFixed(1)}%</div>
+        <div class="scorecard-label">R² Model</div>
+        <div class="scorecard-sub">Adjusted R² = ${(h.adjR2*100).toFixed(1)}%</div>
+      </div>`;
+    }
+    if (h.rPearson !== undefined) {
+      html += `<div class="scorecard">
+        <div class="scorecard-icon">🔗</div>
+        <div class="scorecard-value" style="color:var(--teal)">${h.rPearson}</div>
+        <div class="scorecard-label">Korelasi Pearson (r)</div>
+        <div class="scorecard-sub">Spearman ρ = ${h.rSpearman}</div>
+      </div>`;
+    }
+    if (h.f !== undefined) {
+      html += `<div class="scorecard">
+        <div class="scorecard-icon">📊</div>
+        <div class="scorecard-value" style="color:${h.p<0.05?'var(--green)':'var(--red)'}">
+          ${h.p<0.05?'Sig.':'N.S.'}
+        </div>
+        <div class="scorecard-label">Hasil ANOVA</div>
+        <div class="scorecard-sub">F = ${h.f}, p = ${h.p<0.001?'< 0.001':h.p}</div>
+      </div>`;
+    }
+  }
+
+  html += `</div>`;
+
+  // Timeline proses
+  html += `<div class="result-section-title" style="margin-top:8px;">⏱ Alur Proses Analisis</div>
+  <div class="laporan-timeline">`;
+
+  // Step 1
+  const s1ok = fatalCount === 0 && hasData;
+  html += `<div class="timeline-item">
+    <div class="timeline-dot ${s1ok?'ok':hasData?'warn':'bad'}">${s1ok?'✅':'⚠️'}</div>
+    <div class="timeline-content">
+      <div class="timeline-title">Tahap 1 — Upload & Diagnostik Data</div>
+      <div class="timeline-body">
+        ${hasData
+          ? `${fmtNum(state.rows.length)} baris · ${state.headers.length} kolom berhasil dibaca.
+             ${fatalCount>0?`<strong style="color:var(--red)">${fatalCount} masalah fatal terdeteksi.</strong>`:'Tidak ada masalah fatal.'}
+             ${state.findings?state.findings.filter(f=>f.level==='warning').length:0} peringatan.`
+          : 'Belum ada data yang diupload.'
+        }
+      </div>
+    </div>
+  </div>`;
+
+  // Step 2
+  const s2ok = hasVal && invalidItems === 0;
+  html += `<div class="timeline-item">
+    <div class="timeline-dot ${s2ok?'ok':hasVal?'warn':'na'}">${s2ok?'✅':hasVal?'⚠️':'○'}</div>
+    <div class="timeline-content">
+      <div class="timeline-title">Tahap 2 — Validitas & Reliabilitas</div>
+      <div class="timeline-body">
+        ${hasVal
+          ? `${totalKonstruk} konstruk diuji. ${invalidItems>0?`<strong style="color:var(--yellow)">${invalidItems} item tidak valid.</strong>`:' Semua item valid.'}
+             Alpha rata-rata: ${s2.results.length>0?(s2.results.reduce((s,r)=>s+(r.alpha||0),0)/s2.results.length).toFixed(3):'—'}`
+          : 'Tahap ini dilewati atau belum dijalankan.'
+        }
+        ${s2.results.length>0?`<br><br>${s2.results.map(r=>
+          `<span class="chip" style="margin-right:4px;border-color:${r.invalidItems.length===0?'var(--green)':'var(--yellow)'};">
+            ${escHtml(r.name)}: α=${r.alpha||'—'}
+          </span>`).join('')}`:''}
+      </div>
+    </div>
+  </div>`;
+
+  // Step 3
+  const alatNames4 = {
+    reg_linear:'Regresi Linear', moderasi:'Moderasi',
+    korelasi:'Korelasi', ttest_ind:'Uji-t', anova:'ANOVA', reg_logistik:'Regresi Logistik'
+  };
+  html += `<div class="timeline-item">
+    <div class="timeline-dot ${hasHasil?'ok':'na'}">${hasHasil?'✅':'○'}</div>
+    <div class="timeline-content">
+      <div class="timeline-title">Tahap 3 — Analisis Utama</div>
+      <div class="timeline-body">
+        ${hasHasil
+          ? `Alat uji: <strong>${alatNames4[h.alat]||h.alat}</strong>.
+             Y: <em>${escHtml(h.yCol)}</em> · X: <em>${h.xCols.map(escHtml).join(', ')}</em>.
+             ${h.r2!==undefined?`R² = ${h.r2.toFixed(4)}. F-test p ${h.fpval<0.05?'signifikan':'tidak signifikan'}.`:''}
+             ${h.rPearson!==undefined?`r Pearson = ${h.rPearson}, p = ${h.pPearson<0.001?'< 0.001':h.pPearson}.`:''}
+             ${h.asumsi?buildAsumsiSummaryText(h.asumsi):''}`
+          : 'Analisis belum dijalankan.'
+        }
+      </div>
+    </div>
+  </div>`;
+
+  html += `</div>`; // timeline
+  container.innerHTML = html;
+}
+
+function buildAsumsiSummaryText(asumsi) {
+  const parts = [];
+  if (asumsi.normalitas)          parts.push(`Normalitas: ${asumsi.normalitas.ok?'✅ Terpenuhi':'⚠️ Tidak terpenuhi'}`);
+  if (asumsi.heteroskedastisitas) parts.push(`Heteroskedastisitas: ${asumsi.heteroskedastisitas.ok?'✅ Aman':'⚠️ Terdeteksi'}`);
+  if (asumsi.autokorelasi)        parts.push(`Autokorelasi: ${asumsi.autokorelasi.ok?'✅ Aman':'⚠️ Terdeteksi'} (DW=${asumsi.autokorelasi.dw})`);
+  const vifIssues = asumsi.vif ? asumsi.vif.filter(v=>!v.ok) : [];
+  if (vifIssues.length > 0) parts.push(`Multikolinearitas: ⚠️ VIF tinggi pada ${vifIssues.map(v=>v.col).join(', ')}`);
+  else if (asumsi.vif && asumsi.vif.length > 1) parts.push('Multikolinearitas: ✅ Aman');
+  return parts.length ? '<br><small style="font-family:var(--mono);font-size:11px;color:var(--text3);">' + parts.join(' · ') + '</small>' : '';
+}
+
+// ══ Panel 2: Validasi Menyeluruh ══════════════════
+function buildValidasiPanel() {
+  const container = $('validasi-content');
+  const h = s3.hasil;
+  const items = [];
+
+  // Data checks
+  items.push({
+    status: state.rows.length >= 30 ? 'ok' : state.rows.length >= 10 ? 'warn' : 'bad',
+    icon:   state.rows.length >= 30 ? '✅' : '⚠️',
+    title:  `Ukuran Sampel: n = ${state.rows.length}`,
+    desc:   state.rows.length >= 30
+      ? 'Sampel memenuhi batas minimal umum (n ≥ 30) untuk analisis inferensial.'
+      : state.rows.length >= 10
+      ? 'Sampel kecil. Hasil analisis mungkin tidak stabil dan tidak bisa digeneralisasi.'
+      : 'Sampel sangat kecil. Hasil analisis tidak dapat diandalkan.'
+  });
+
+  const fatalCount = state.findings ? state.findings.filter(f=>f.level==='fatal').length : 0;
+  items.push({
+    status: fatalCount === 0 ? 'ok' : 'bad',
+    icon:   fatalCount === 0 ? '✅' : '❌',
+    title:  fatalCount === 0 ? 'Tidak ada masalah fatal pada data' : `${fatalCount} masalah fatal terdeteksi`,
+    desc:   fatalCount === 0
+      ? 'Struktur file dan format data tidak memiliki masalah yang menghambat analisis.'
+      : 'Ada masalah serius pada data yang dapat memengaruhi validitas hasil. Periksa kembali laporan diagnostik Tahap 1.'
+  });
+
+  // Validitas
+  if (s2.results.length > 0) {
+    const allValid = s2.results.every(r => r.invalidItems.length === 0);
+    const allReliable = s2.results.every(r => r.alpha !== null && r.alpha >= 0.6);
+    items.push({
+      status: allValid ? 'ok' : 'warn',
+      icon:   allValid ? '✅' : '⚠️',
+      title:  allValid ? 'Semua item instrumen valid' : 'Terdapat item tidak valid',
+      desc:   allValid
+        ? `Seluruh item pada ${s2.results.length} konstruk memiliki korelasi item-total ≥ 0.3.`
+        : `Beberapa item memiliki korelasi item-total di bawah batas. Pertimbangkan sebagai limitasi penelitian.`
+    });
+    items.push({
+      status: allReliable ? 'ok' : 'warn',
+      icon:   allReliable ? '✅' : '⚠️',
+      title:  allReliable ? 'Semua konstruk reliabel (α ≥ 0.6)' : 'Terdapat konstruk dengan reliabilitas rendah',
+      desc:   allReliable
+        ? `Cronbach's Alpha semua konstruk memenuhi batas minimum 0.6.`
+        : `Satu atau lebih konstruk memiliki Alpha < 0.6. Sebutkan sebagai keterbatasan instrumen dalam laporan.`
+    });
+  } else {
+    items.push({ status:'na', icon:'○', title:'Uji Validitas & Reliabilitas dilewati', desc:'Tahap 2 tidak dijalankan dalam sesi ini.' });
+  }
+
+  // Asumsi klasik
+  if (h && h.asumsi) {
+    const a = h.asumsi;
+    items.push({
+      status: a.normalitas.ok ? 'ok' : 'warn', icon: a.normalitas.ok ? '✅' : '⚠️',
+      title:  `Normalitas Residual: ${a.normalitas.label}`,
+      desc:   a.normalitas.ok
+        ? 'Residual model berdistribusi normal. Asumsi OLS terpenuhi.'
+        : 'Residual tidak normal. Hasil inferensi mungkin kurang akurat untuk sampel kecil. Untuk sampel besar (n > 30), Central Limit Theorem masih berlaku.'
+    });
+    items.push({
+      status: a.heteroskedastisitas.ok ? 'ok' : 'warn', icon: a.heteroskedastisitas.ok ? '✅' : '⚠️',
+      title:  `Heteroskedastisitas: ${a.heteroskedastisitas.label}`,
+      desc:   a.heteroskedastisitas.ok
+        ? 'Varians residual homogen — asumsi homoskedastisitas terpenuhi.'
+        : 'Terdeteksi heteroskedastisitas. Standard error estimasi mungkin bias. Pertimbangkan transformasi variabel atau robust standard error.'
+    });
+    const vifMax = a.vif ? Math.max(...a.vif.map(v=>v.vif)) : 1;
+    if (a.vif && a.vif.length > 1) {
+      items.push({
+        status: vifMax < 10 ? 'ok' : 'bad', icon: vifMax < 10 ? '✅' : '❌',
+        title:  `Multikolinearitas: VIF maks = ${vifMax}`,
+        desc:   vifMax < 10
+          ? 'Tidak ada multikolinearitas serius. Semua VIF < 10.'
+          : 'Multikolinearitas tinggi terdeteksi. Pertimbangkan menghapus atau menggabungkan variabel yang berkorelasi.'
+      });
+    }
+    items.push({
+      status: a.autokorelasi.ok ? 'ok' : 'warn', icon: a.autokorelasi.ok ? '✅' : '⚠️',
+      title:  `Autokorelasi (DW = ${a.autokorelasi.dw}): ${a.autokorelasi.label}`,
+      desc:   a.autokorelasi.ok
+        ? 'Tidak ada autokorelasi signifikan.'
+        : 'Autokorelasi terdeteksi. Relevan terutama untuk data panel atau time series.'
+    });
+  }
+
+  // Model fit
+  if (h && h.r2 !== undefined) {
+    const r2pct = (h.r2 * 100).toFixed(1);
+    const r2ok  = h.r2 >= 0.5;
+    items.push({
+      status: h.fpval < 0.05 ? 'ok' : 'bad', icon: h.fpval < 0.05 ? '✅' : '❌',
+      title:  `Model signifikan secara keseluruhan: F = ${h.fstat.toFixed(3)}, p ${h.fpval<0.001?'< 0.001':h.fpval.toFixed(4)}`,
+      desc:   h.fpval < 0.05
+        ? `Model regresi secara keseluruhan signifikan. R² = ${h.r2.toFixed(4)} — model menjelaskan ${r2pct}% varians Y.`
+        : 'Model regresi secara keseluruhan tidak signifikan. Perlu ditinjau kembali pemilihan variabel.'
+    });
+  }
+
+  let html = `<div class="checklist">`;
+  items.forEach((item, i) => {
+    html += `
+    <div class="check-item ${item.status}" style="animation-delay:${i*0.04}s">
+      <div class="check-icon">${item.icon}</div>
+      <div class="check-body">
+        <div class="check-title">${item.title}</div>
+        <div class="check-desc">${item.desc}</div>
+      </div>
+    </div>`;
+  });
+  html += `</div>`;
+
+  const okCount   = items.filter(i=>i.status==='ok').length;
+  const warnCount = items.filter(i=>i.status==='warn').length;
+  const badCount  = items.filter(i=>i.status==='bad').length;
+
+  html = `<div class="summary-strip" style="margin-bottom:16px;">
+    <div class="sum-badge ok">✅ ${okCount} Terpenuhi</div>
+    ${warnCount>0?`<div class="sum-badge warning">⚠️ ${warnCount} Perlu perhatian</div>`:''}
+    ${badCount>0?`<div class="sum-badge fatal">❌ ${badCount} Bermasalah</div>`:''}
+  </div>` + html;
+
+  container.innerHTML = html;
+}
+
+// ══ Panel 3: Narasi Skripsi ═══════════════════════
+function buildNarasiPanel() {
+  const container = $('narasi-content');
+  const h = s3.hasil;
+
+  if (!h) {
+    container.innerHTML = `<div style="color:var(--text2);font-size:13px;padding:20px 0;">Selesaikan analisis untuk mendapatkan narasi.</div>`;
+    return;
+  }
+
+  const alatNames4 = {
+    reg_linear:'Analisis Regresi Linear Berganda',
+    moderasi:  'Analisis Moderasi',
+    korelasi:  'Analisis Korelasi',
+    ttest_ind: 'Uji Beda (Independent t-test)',
+    anova:     'Analisis Varians (ANOVA)',
+    reg_logistik:'Analisis Regresi Logistik'
+  };
+
+  let narasiSections = [];
+
+  // Bagian 1: Deskripsi sampel & data
+  narasiSections.push({
+    title: '1. Gambaran Umum Data Penelitian',
+    id: 'narasi-data',
+    text: `Penelitian ini menggunakan data primer yang diperoleh dari ${state.rows.length} responden.
+    Data dikumpulkan melalui ${state.headers.length} variabel pengukuran.
+    ${state.findings && state.findings.filter(f=>f.level==='ok').length > 0
+      ? 'Hasil pemeriksaan kualitas data menunjukkan tidak ditemukan masalah fatal yang dapat menghambat proses analisis.'
+      : 'Beberapa catatan terkait kualitas data telah diidentifikasi dan menjadi pertimbangan dalam interpretasi hasil.'
+    }`
+  });
+
+  // Bagian 2: Validitas & reliabilitas
+  if (s2.results.length > 0) {
+    const konstrukLines = s2.results.map(r => {
+      const validCount = r.itemResults.filter(i=>i.status==='valid').length;
+      return `Konstruk ${r.name} terdiri dari ${r.itemCount} item pengukuran.
+      Hasil uji validitas menunjukkan ${validCount} dari ${r.itemCount} item dinyatakan valid
+      dengan nilai r hitung > r tabel.
+      Hasil uji reliabilitas menunjukkan nilai Cronbach's Alpha sebesar ${r.alpha !== null ? r.alpha : 'tidak dapat dihitung'},
+      yang tergolong ${r.alphaStatus === 'excellent' ? 'sangat baik (α ≥ 0.9)' :
+                       r.alphaStatus === 'good'      ? 'baik (0.7 ≤ α < 0.9)' :
+                       r.alphaStatus === 'acceptable'? 'cukup (0.6 ≤ α < 0.7)' : 'kurang reliabel (α < 0.6)'}.`;
+    });
+    narasiSections.push({
+      title: '2. Hasil Uji Validitas dan Reliabilitas Instrumen',
+      id: 'narasi-validitas',
+      text: konstrukLines.join(' ')
+    });
+  }
+
+  // Bagian 3: Asumsi klasik
+  if (h.asumsi) {
+    const a = h.asumsi;
+    narasiSections.push({
+      title: '3. Hasil Uji Asumsi Klasik',
+      id: 'narasi-asumsi',
+      text: `Sebelum dilakukan analisis regresi, terlebih dahulu dilakukan serangkaian uji asumsi klasik.
+      Hasil uji normalitas menunjukkan bahwa residual model ${a.normalitas.ok ? 'berdistribusi normal' : 'tidak berdistribusi normal secara sempurna'},
+      dengan nilai statistik K² sebesar ${a.normalitas.stat} (p = ${a.normalitas.p}).
+      ${a.vif && a.vif.length > 1
+        ? `Hasil uji multikolinearitas menunjukkan nilai VIF maksimum sebesar ${Math.max(...a.vif.map(v=>v.vif))},
+           yang ${Math.max(...a.vif.map(v=>v.vif)) < 10 ? 'berada di bawah batas toleransi (VIF < 10), sehingga tidak terdapat masalah multikolinearitas.' : 'mengindikasikan adanya multikolinearitas yang perlu diperhatikan.'}`
+        : ''
+      }
+      Hasil uji heteroskedastisitas dengan metode Breusch-Pagan menunjukkan nilai χ² sebesar ${a.heteroskedastisitas.stat}
+      (p = ${a.heteroskedastisitas.p}), yang mengindikasikan bahwa model ${a.heteroskedastisitas.ok ? 'bebas dari masalah heteroskedastisitas' : 'mengandung heteroskedastisitas'}.
+      Nilai Durbin-Watson sebesar ${a.autokorelasi.dw} menunjukkan bahwa ${a.autokorelasi.label.toLowerCase()}.`
+    });
+  }
+
+  // Bagian 4: Hasil analisis utama
+  let analisisText = '';
+  if ((h.alat === 'reg_linear' || h.alat === 'moderasi') && h.beta) {
+    const sigXs = h.xCols.filter((_,i) => h.pval[i+1] < 0.05);
+    const nsigXs = h.xCols.filter((_,i) => h.pval[i+1] >= 0.05);
+    analisisText = `
+      Hasil analisis ${alatNames4[h.alat]} menunjukkan bahwa model secara keseluruhan
+      ${h.fpval < 0.05 ? 'berpengaruh signifikan' : 'tidak berpengaruh signifikan'}
+      terhadap variabel ${h.yCol}
+      (F = ${h.fstat.toFixed(3)}, p ${h.fpval < 0.001 ? '< 0.001' : '= ' + h.fpval.toFixed(4)}).
+      Koefisien determinasi (R²) sebesar ${h.r2.toFixed(4)} menunjukkan bahwa
+      ${(h.r2 * 100).toFixed(2)}% variasi pada variabel ${h.yCol} dapat dijelaskan
+      oleh variabel-variabel dalam model, sedangkan sisanya sebesar ${(100 - h.r2 * 100).toFixed(2)}%
+      dijelaskan oleh faktor lain di luar model.
+      ${sigXs.length > 0 ? `Variabel yang berpengaruh signifikan terhadap ${h.yCol} adalah:
+      ${sigXs.map((xc,xi) => {
+        const idx = h.xCols.indexOf(xc)+1;
+        const b = h.beta[idx];
+        return `${xc} (β = ${b>=0?'+':''}${b.toFixed(4)}, p ${h.pval[idx]<0.001?'< 0.001':'= '+h.pval[idx].toFixed(4)})`;
+      }).join('; ')}.` : ''}
+      ${nsigXs.length > 0 ? `Sedangkan variabel ${nsigXs.join(', ')} tidak berpengaruh signifikan (p ≥ 0.05).` : ''}
+      ${h.alat === 'moderasi' && h.labels.some(l=>l.includes('×'))
+        ? (() => {
+            const intIdx = h.labels.findIndex(l=>l.includes('×'));
+            return intIdx > -1
+              ? `Uji efek moderasi menunjukkan bahwa variabel ${h.mCols[0]}
+                 ${h.pval[intIdx]<0.05?'terbukti secara signifikan memoderasi':'tidak terbukti memoderasi'}
+                 pengaruh ${h.xCols[0]} terhadap ${h.yCol}
+                 (β interaksi = ${h.beta[intIdx]>=0?'+':''}${h.beta[intIdx].toFixed(4)},
+                 p ${h.pval[intIdx]<0.001?'< 0.001':'= '+h.pval[intIdx].toFixed(4)}).`
+              : '';
+          })()
+        : ''
+      }`;
+  } else if (h.alat === 'korelasi') {
+    const interp = Math.abs(h.rPearson)>=0.8?'sangat kuat':Math.abs(h.rPearson)>=0.6?'kuat':Math.abs(h.rPearson)>=0.4?'sedang':Math.abs(h.rPearson)>=0.2?'lemah':'sangat lemah';
+    analisisText = `
+      Hasil analisis korelasi menunjukkan terdapat hubungan yang ${interp} dan ${h.rPearson>=0?'positif':'negatif'}
+      antara ${h.xCols[0]} dengan ${h.yCol}
+      (r = ${h.rPearson}, p ${h.pPearson<0.001?'< 0.001':'= '+h.pPearson}).
+      Hubungan ini ${h.pPearson<0.05?'signifikan secara statistik':'tidak signifikan secara statistik'} pada taraf signifikansi 5%.
+      Hasil uji Spearman yang konsisten (ρ = ${h.rSpearman}, p ${h.pSpearman<0.001?'< 0.001':'= '+h.pSpearman})
+      mengkonfirmasi robustness temuan ini.`;
+  } else if (h.alat === 'ttest_ind' && h.t !== undefined) {
+    analisisText = `
+      Hasil uji-t independen menunjukkan terdapat perbedaan yang ${h.p<0.05?'signifikan':'tidak signifikan'}
+      pada rata-rata ${h.yCol} antara kelompok ${h.group1Name} (M = ${h.m1.toFixed(3)}, n = ${h.n1})
+      dengan kelompok ${h.group2Name} (M = ${h.m2.toFixed(3)}, n = ${h.n2}),
+      t(${h.df}) = ${h.t}, p ${h.p<0.001?'< 0.001':'= '+h.p}.`;
+  } else if (h.alat === 'anova' && h.f !== undefined) {
+    analisisText = `
+      Hasil One-Way ANOVA menunjukkan terdapat perbedaan rata-rata ${h.yCol} yang ${h.p<0.05?'signifikan':'tidak signifikan'}
+      antar ${h.groups.length} kelompok
+      (F(${h.dfBet},${h.dfWit}) = ${h.f}, p ${h.p<0.001?'< 0.001':'= '+h.p}).
+      ${h.p<0.05?`Untuk mengetahui kelompok mana yang secara spesifik berbeda, disarankan dilanjutkan dengan uji post-hoc.`:''}`;
+  }
+
+  narasiSections.push({
+    title: `4. Hasil ${alatNames4[h.alat]||h.alat}`,
+    id: 'narasi-analisis',
+    text: analisisText
+  });
+
+  let html = '';
+  narasiSections.forEach(section => {
+    html += `
+    <div class="narasi-skripsi" style="margin-bottom:16px;">
+      <div class="narasi-skripsi-header">
+        <span class="narasi-skripsi-title">${section.title}</span>
+        <button class="copy-btn" onclick="copyNarasi('${section.id}', this)">📋 Salin</button>
+      </div>
+      <div class="narasi-skripsi-body" id="${section.id}">
+        <p>${section.text.trim().split(/\s+/).join(' ')}</p>
+      </div>
+    </div>`;
+  });
+
+  html += `
+  <div class="insight-box" style="margin-top:8px;">
+    <strong>💡 Catatan:</strong> Narasi di atas adalah <em>draft otomatis</em> yang dibuat berdasarkan hasil analisis statistik.
+    Kamu perlu menyesuaikan dengan konteks penelitianmu, menambahkan referensi teori, serta memperkaya dengan diskusi yang lebih mendalam.
+    Narasi ini hanya titik awal — bukan hasil akhir penulisan.
+  </div>`;
+
+  container.innerHTML = html;
+}
+
+function copyNarasi(id, btn) {
+  const el = $(id);
+  if (!el) return;
+  navigator.clipboard.writeText(el.innerText).then(() => {
+    btn.textContent = '✅ Tersalin!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = '📋 Salin'; btn.classList.remove('copied'); }, 2500);
+  });
+}
+
+// ══ Export Functions ══════════════════════════════
+function exportPDF() {
+  switchLaporan('narasi');
+  setTimeout(() => window.print(), 300);
+}
+
+function downloadFile(content, filename, mime) {
+  const blob = new Blob([content], { type: mime });
+  const a    = document.createElement('a');
+  a.href     = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function exportNarasiTxt() {
+  const h = s3.hasil;
+  if (!h) { showToast('Jalankan analisis terlebih dahulu', '⚠️'); return; }
+  buildNarasiPanel();
+  setTimeout(() => {
+    const panels = document.querySelectorAll('.narasi-skripsi-body');
+    let txt = 'NARASI HASIL ANALISIS — StatLab\n';
+    txt += '='.repeat(50) + '\n\n';
+    panels.forEach((p, i) => {
+      txt += p.innerText + '\n\n';
+    });
+    txt += '\n[Dihasilkan oleh StatLab — ' + new Date().toLocaleDateString('id-ID') + ']';
+    downloadFile(txt, 'narasi_analisis.txt', 'text/plain;charset=utf-8');
+    showToast('Narasi berhasil didownload', '✅');
+  }, 200);
+}
+
+function exportJSON() {
+  const data = {
+    meta:       { tanggal: new Date().toISOString(), aplikasi: 'StatLab v1.0' },
+    data_info:  { n: state.rows.length, kolom: state.headers.length },
+    diagnostik: state.findings || [],
+    validitas:  s2.results,
+    analisis:   s3.hasil,
+  };
+  downloadFile(JSON.stringify(data, null, 2), 'hasil_analisis_statlab.json', 'application/json');
+  showToast('JSON berhasil didownload', '✅');
+}
+
+function exportCSVHasil() {
+  const h = s3.hasil;
+  if (!h) { showToast('Jalankan analisis terlebih dahulu', '⚠️'); return; }
+  let csv = '';
+  if (h.beta && h.labels) {
+    csv = 'Variabel,Koefisien,Std Error,t-statistik,p-value,Signifikan\n';
+    h.labels.forEach((lbl, i) => {
+      const sig = h.pval[i] < 0.05 ? 'Ya' : 'Tidak';
+      csv += `"${lbl}",${h.beta[i].toFixed(4)},${h.se[i].toFixed(4)},${h.tstat[i].toFixed(4)},${h.pval[i].toFixed(4)},${sig}\n`;
+    });
+    csv += `\nR²,${h.r2.toFixed(4)}\nAdj R²,${h.adjR2.toFixed(4)}\nF,${h.fstat.toFixed(4)}\np(F),${h.fpval.toFixed(4)}\nn,${h.n}`;
+  } else if (h.rPearson !== undefined) {
+    csv = 'Metode,Koefisien,p-value\n';
+    csv += `Pearson r,${h.rPearson},${h.pPearson}\n`;
+    csv += `Spearman rho,${h.rSpearman},${h.pSpearman}\n`;
+  }
+  if (csv) {
+    downloadFile(csv, 'tabel_hasil_analisis.csv', 'text/csv;charset=utf-8');
+    showToast('CSV berhasil didownload', '✅');
+  } else {
+    showToast('Format export belum tersedia untuk alat uji ini', '⚠️');
+  }
+}
+
+
+// ═══════════════════════════════════════════════════
+//  FIREBASE INTEGRATION
+// ═══════════════════════════════════════════════════
+
+function fbReady() { return window._fb && window._fb.db; }
+
+// ── Update session bar UI ──────────────────────────
+function setSessionStatus(status, msg) {
+  const dot   = $('session-dot');
+  const label = $('session-label');
+  if (!dot || !label) return;
+  dot.className   = 'session-dot ' + status;
+  label.innerHTML = msg;
+}
+
+// ── Auto-save callback ─────────────────────────────
+window._fbAutoSave = function() {
+  if (state.rows.length > 0) saveSessionFB(false);
+};
+
+// ── Save session to Firebase ───────────────────────
+async function saveSessionFB(manual = false) {
+  if (!fbReady()) {
+    if (manual) showToast('Firebase belum terhubung', '⚠️');
+    return;
+  }
+
+  setSessionStatus('saving', 'Menyimpan…');
+
+  const { db, ref, set, serverTimestamp, SID } = window._fb;
+
+  const payload = {
+    sid:          SID,
+    ts:           Date.now(),
+    step:         getCurrentStep(),
+    fileName:     state.rawFile ? state.rawFile.name : null,
+    rowCount:     state.rows.length,
+    colCount:     state.headers.length,
+    headers:      state.headers,
+    findings:     (state.findings || []).map(f => ({
+      level: f.level, title: f.title, section: f.section
+    })),
+    konstruks:    s2.konstruks.map(k => ({ name: k.name, itemCount: k.items.length })),
+    s2Results:    s2.results.map(r => ({
+      name: r.name, alpha: r.alpha, alphaStatus: r.alphaStatus,
+      invalidCount: r.invalidItems.length, itemCount: r.itemCount
+    })),
+    alat:         s3.selectedAlat,
+    yCol:         s3.hasil ? s3.hasil.yCol : null,
+    xCols:        s3.hasil ? s3.hasil.xCols : null,
+    r2:           s3.hasil && s3.hasil.r2 !== undefined ? s3.hasil.r2 : null,
+    fpval:        s3.hasil && s3.hasil.fpval !== undefined ? s3.hasil.fpval : null,
+    analisisDone: s3.hasil !== null,
+  };
+
+  try {
+    await set(ref(db, 'sessions/' + SID), payload);
+    const timeStr = new Date().toLocaleTimeString('id-ID', { hour:'2-digit', minute:'2-digit' });
+    setSessionStatus('online',
+      `<strong>Tersimpan</strong> · ${timeStr} · ID: <code style="font-family:var(--mono);font-size:10px;">${SID.slice(0,12)}…</code>`);
+    if (manual) showToast('Progress tersimpan ke server!', '✅');
+  } catch(e) {
+    setSessionStatus('offline', '⚠️ Gagal menyimpan — periksa koneksi internet');
+    if (manual) showToast('Gagal menyimpan: ' + e.message, '❌');
+  }
+}
+
+// ── Get current step ───────────────────────────────
+function getCurrentStep() {
+  if ($('sec-laporan')  && hasClass('sec-laporan','active'))   return 4;
+  if ($('sec-analisis') && hasClass('sec-analisis','active'))  return 3;
+  if ($('sec-validitas')&& hasClass('sec-validitas','active')) return 2;
+  return 1;
+}
+
+// ── Restore session ────────────────────────────────
+async function restoreSession() {
+  if (!fbReady()) {
+    setSessionStatus('offline', '⚠️ Tidak dapat terhubung ke server');
+    return;
+  }
+
+  const { db, ref, get, SID } = window._fb;
+  setSessionStatus('online',
+    `Terhubung · ID: <code style="font-family:var(--mono);font-size:10px;">${SID.slice(0,12)}…</code>`);
+
+  try {
+    const snap = await get(ref(db, 'sessions/' + SID));
+    if (!snap.exists()) return;
+
+    const data = snap.val();
+    if (!data.rowCount || data.rowCount === 0) return;
+
+    // Show restore banner
+    const banner  = $('restore-banner');
+    const info    = $('restore-info');
+    if (!banner || !info) return;
+
+    const ts       = new Date(data.ts).toLocaleString('id-ID');
+    const stepName = ['','Upload & Diagnostik','Validitas & Reliabilitas','Analisis Utama','Laporan'][data.step] || 'Tidak diketahui';
+
+    info.innerHTML = `File: <strong>${data.fileName || 'tidak diketahui'}</strong> · 
+      ${data.rowCount} baris · Terakhir di <strong>Tahap ${data.step}: ${stepName}</strong> · ${ts}`;
+
+    banner.classList.add('show');
+    window._fbRestoreData = data;
+
+  } catch(e) {
+    console.warn('Restore failed:', e);
+  }
+}
+
+async function loadSessionFB() {
+  const data = window._fbRestoreData;
+  if (!data) return;
+
+  dismissRestore();
+
+  // Restore lightweight metadata (full data needs re-upload for security)
+  showToast('Sesi dipulihkan. Upload ulang file untuk melanjutkan analisis.', '🔄', 5000);
+
+  // Restore konstruk config if available
+  if (data.konstruks && data.konstruks.length > 0) {
+    s2.konstruks = data.konstruks.map((k, i) => ({
+      id: 'k_' + (i+1),
+      name: k.name,
+      items: []
+    }));
+    konstrukCounter = data.konstruks.length;
+  }
+
+  // Pre-fill alat selection
+  if (data.alat) s3.selectedAlat = data.alat;
+
+  // Show info card about what was restored
+  const diag = $('diag-result');
+  if (diag) {
+    diag.style.display = 'block';
+    diag.innerHTML = `
+      <div class="card" style="border-color:rgba(59,130,246,.3);">
+        <div class="card-header">
+          <div class="card-icon blue">🔄</div>
+          <div>
+            <div class="card-title">Sesi Dipulihkan dari Server</div>
+            <div class="card-subtitle">Data konfigurasi berhasil dimuat. Upload ulang file Excel untuk melanjutkan analisis.</div>
+          </div>
+        </div>
+        <div class="stats-grid">
+          <div class="stat-card blue"><div class="stat-value">${data.rowCount}</div><div class="stat-label">Responden sebelumnya</div></div>
+          <div class="stat-card teal"><div class="stat-value">${data.colCount}</div><div class="stat-label">Kolom</div></div>
+          <div class="stat-card green"><div class="stat-value">${data.s2Results ? data.s2Results.length : 0}</div><div class="stat-label">Konstruk tersimpan</div></div>
+          <div class="stat-card yellow"><div class="stat-value">${data.step}</div><div class="stat-label">Tahap terakhir</div></div>
+        </div>
+        ${data.s2Results && data.s2Results.length > 0 ? `
+          <div style="margin-top:8px;font-size:13px;color:var(--text2);">
+            Konstruk tersimpan: ${data.s2Results.map(r=>
+              `<span class="chip" style="margin:2px;">${escHtml(r.name)} (α=${r.alpha||'—'})</span>`
+            ).join('')}
+          </div>` : ''}
+      </div>`;
+  }
+}
+
+function dismissRestore() {
+  const b = $('restore-banner');
+  if (b) b.classList.remove('show');
+}
+
+// ── Auto-save hooks (called after major actions) ───
+const _origRunDiagnostic = window.runDiagnostic;
+const _origRunValiditas  = window.runValiditas;
+const _origRunAnalisis   = window.runAnalisis;
+
+// Override to add auto-save after each major action
+document.addEventListener('DOMContentLoaded', () => {
+  // patch after load
+});
+
+// Save when navigating between steps
+['goToStep2','goToStep3','goToStep4'].forEach(fn => {
+  const orig = window[fn];
+  if (orig) {
+    window[fn] = function(...args) {
+      orig.apply(this, args);
+      setTimeout(() => saveSessionFB(false), 1000);
+    };
+  }
+});
+
+// ═══════════════════════════════════════════════════
+//  DASHBOARD DOSEN
+// ═══════════════════════════════════════════════════
+
+function openDashboard() {
+  addClass('dash-modal','show');
+  loadDashboard();
+}
+
+function closeDashboard() {
+  removeClass('dash-modal','show');
+}
+
+// Close modal on overlay click
+$('dash-modal') && $('dash-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeDashboard();
+});
+
+
+// ── Dashboard row builder (outside template literal to avoid {} conflicts) ──
+const ALAT_NAMES_DASH = {
+  reg_linear:'Regresi Linear', moderasi:'Moderasi', korelasi:'Korelasi',
+  ttest_ind:'Uji-t', anova:'ANOVA', reg_logistik:'Regresi Logistik'
+};
+const STEP_CLS_DASH = ['','s1','s2','s3','s4'];
+const STEP_LBL_DASH = ['','Diagnostik','Validitas','Analisis','Laporan'];
+
+function buildDashRow(r, i) {
+  const ts     = r.ts ? new Date(r.ts).toLocaleString('id-ID', {day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) : '—';
+  const done   = r.analisisDone;
+  const alatLbl = ALAT_NAMES_DASH[r.alat] || '—';
+  const r2txt  = (r.r2 !== null && r.r2 !== undefined) ? (r.r2*100).toFixed(1)+'%' : '—';
+  const stepN  = r.step || 1;
+  const fname  = (r.fileName || '—');
+  const fnameS = fname.length > 20 ? fname.slice(0,18)+'…' : fname;
+  const doneHtml = done
+    ? '<span style="color:var(--green);">✅ R²='+r2txt+'</span>'
+    : '<span style="color:var(--text3);">Belum selesai</span>';
+  return '<tr>'
+    + '<td style="color:var(--text3);font-family:var(--mono);font-size:11px;">'+(i+1)+'</td>'
+    + '<td style="font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+escHtml(fname)+'">'+escHtml(fnameS)+'</td>'
+    + '<td style="font-family:var(--mono);font-size:12px;">'+(r.rowCount||'—')+'</td>'
+    + '<td style="font-family:var(--mono);font-size:12px;">'+(r.colCount||'—')+'</td>'
+    + '<td><span class="step-badge '+(STEP_CLS_DASH[stepN]||'s1')+'">Tahap '+stepN+'</span></td>'
+    + '<td style="font-size:12px;color:var(--text2);">'+alatLbl+'</td>'
+    + '<td style="font-size:12px;">'+doneHtml+'</td>'
+    + '<td style="font-family:var(--mono);font-size:11px;color:var(--text3);">'+ts+'</td>'
+    + '</tr>';
+}
+
+async function loadDashboard() {
+  if (!fbReady()) {
+    $('dash-content').innerHTML = '<div style="color:var(--red);font-size:13px;">Firebase tidak terhubung.</div>';
+    return;
+  }
+
+  const { db, ref, get } = window._fb;
+  $('dash-content').innerHTML = '<div style="color:var(--text2);font-size:13px;">⏳ Memuat data real-time…</div>';
+
+  try {
+    const snap = await get(ref(db, 'sessions'));
+    if (!snap.exists()) {
+      $('dash-content').innerHTML = '<div style="color:var(--text2);font-size:13px;">Belum ada sesi mahasiswa yang tercatat.</div>';
+      return;
+    }
+
+    const sessions = snap.val();
+    const rows     = Object.values(sessions).filter(s => s.rowCount > 0);
+
+    // Sort by timestamp desc
+    rows.sort((a,b) => (b.ts||0) - (a.ts||0));
+
+    // Compute stats
+    const totalSesi   = rows.length;
+    const selesai     = rows.filter(r => r.analisisDone).length;
+    const avgRow      = rows.length ? Math.round(rows.reduce((s,r)=>s+(r.rowCount||0),0)/rows.length) : 0;
+    const stepDist    = [0,0,0,0,0];
+    rows.forEach(r => { if(r.step>=1&&r.step<=4) stepDist[r.step]++; });
+
+    // Fatal issues summary
+    const totalFatal = rows.reduce((s,r) => {
+      if (!r.findings) return s;
+      return s + r.findings.filter(f=>f.level==='fatal').length;
+    }, 0);
+
+    // Common finding titles
+    const findingMap = {};
+    rows.forEach(r => {
+      if (!r.findings) return;
+      r.findings.forEach(f => {
+        if (f.level === 'fatal' || f.level === 'warning') {
+          findingMap[f.title] = (findingMap[f.title]||0) + 1;
+        }
+      });
+    });
+    const topFindings = Object.entries(findingMap)
+      .sort((a,b)=>b[1]-a[1]).slice(0,5);
+
+    const stepLabel = ['','Diagnostik Data','Validitas','Analisis Utama','Laporan'];
+    const stepCls   = ['','s1','s2','s3','s4'];
+
+    let html = `
+    <div class="dash-stat-row">
+      <div class="dash-stat">
+        <div class="dash-stat-val" style="color:var(--accent)">${totalSesi}</div>
+        <div class="dash-stat-label">Total Sesi</div>
+      </div>
+      <div class="dash-stat">
+        <div class="dash-stat-val" style="color:var(--green)">${selesai}</div>
+        <div class="dash-stat-label">Selesai Analisis</div>
+      </div>
+      <div class="dash-stat">
+        <div class="dash-stat-val" style="color:var(--yellow)">${totalSesi - selesai}</div>
+        <div class="dash-stat-label">Masih Proses</div>
+      </div>
+      <div class="dash-stat">
+        <div class="dash-stat-val" style="color:var(--teal)">${avgRow}</div>
+        <div class="dash-stat-label">Rata-rata n</div>
+      </div>
+      <div class="dash-stat">
+        <div class="dash-stat-val" style="color:var(--red)">${totalFatal}</div>
+        <div class="dash-stat-label">Total Masalah Fatal</div>
+      </div>
+    </div>
+
+    <div style="margin-bottom:16px;">
+      <div class="result-section-title">📋 Distribusi Tahap Mahasiswa</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        ${[1,2,3,4].map(s=>`
+          <div style="flex:1;min-width:80px;background:var(--bg2);border:1px solid var(--border2);border-radius:8px;padding:12px;text-align:center;">
+            <div style="font-size:20px;font-weight:800;font-family:var(--mono);">${stepDist[s]}</div>
+            <div style="font-size:11px;color:var(--text2);margin-top:2px;">Tahap ${s}</div>
+            <div style="font-size:10px;color:var(--text3);">${stepLabel[s]}</div>
+          </div>`).join('')}
+      </div>
+    </div>
+
+    ${topFindings.length > 0 ? `
+    <div style="margin-bottom:16px;">
+      <div class="result-section-title">⚠️ Masalah Paling Sering Ditemukan</div>
+      ${topFindings.map(([title, count]) => `
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;
+             background:var(--bg2);border-radius:8px;margin-bottom:6px;font-size:13px;">
+          <span style="flex:1;color:var(--text2);">${escHtml(title.length>70?title.slice(0,68)+'…':title)}</span>
+          <span style="font-family:var(--mono);font-weight:700;color:var(--yellow);margin-left:12px;">${count}×</span>
+        </div>`).join('')}
+    </div>` : ''}
+
+    <div>
+      <div class="result-section-title" style="display:flex;justify-content:space-between;">
+        <span>📊 Daftar Sesi Mahasiswa</span>
+        <button class="btn btn-ghost btn-sm" onclick="loadDashboard()" style="padding:3px 10px;font-size:11px;">↺ Refresh</button>
+      </div>
+      <div style="overflow-x:auto;border-radius:10px;border:1px solid var(--border);">
+        <table class="dash-table">
+          <thead><tr>
+            <th>#</th>
+            <th>File</th>
+            <th>n</th>
+            <th>Kolom</th>
+            <th>Tahap</th>
+            <th>Alat Uji</th>
+            <th>Analisis</th>
+            <th>Terakhir Aktif</th>
+          </tr></thead>
+          <tbody>
+            ${rows.slice(0,30).map((r,i) => buildDashRow(r,i)).join('')}
+          </tbody>
+        </table>
+      </div>
+      ${rows.length > 30 ? `<div style="font-size:12px;color:var(--text2);margin-top:8px;text-align:center;">Menampilkan 30 dari ${rows.length} sesi</div>` : ''}
+    </div>`;
+
+    $('dash-content').innerHTML = html;
+
+  } catch(e) {
+    $('dash-content').innerHTML = `<div style="color:var(--red);font-size:13px;">Gagal memuat dashboard: ${e.message}</div>`;
+  }
+}
+
+</script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  --bg:       #070910;
+  --bg1:      #0d1117;
+  --bg2:      #111827;
+  --bg3:      #1a2236;
+  --border:   #1e2d45;
+  --border2:  #243348;
+  --text:     #e8edf5;
+  --text2:    #8896ad;
+  --text3:    #4a5568;
+  --accent:   #3b82f6;
+  --accent2:  #6366f1;
+  --teal:     #14b8a6;
+  --green:    #22c55e;
+  --yellow:   #f59e0b;
+  --red:      #ef4444;
+  --mono:     'JetBrains Mono', monospace;
+  --sans:     'Sora', sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ── Noise overlay ── */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 0;
+  opacity: .4;
+}
+
+/* ── Grid bg ── */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border) 1px, transparent 1px);
+  background-size: 48px 48px;
+  opacity: .25;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ── Glow blobs ── */
+.blob {
+  position: fixed;
+  border-radius: 50%;
+  filter: blur(120px);
+  pointer-events: none;
+  z-index: 0;
+}
+.blob-1 { width:500px;height:500px;top:-100px;left:-100px;background:rgba(59,130,246,.06); }
+.blob-2 { width:400px;height:400px;bottom:-80px;right:-80px;background:rgba(99,102,241,.07); }
+.blob-3 { width:300px;height:300px;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(20,184,166,.04); }
+
+/* ── Layout ── */
+#app { position: relative; z-index: 1; max-width: 1100px; margin: 0 auto; padding: 0 24px 80px; }
+
+/* ── Header ── */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 28px 0 20px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 56px;
+}
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.logo-icon {
+  width: 36px; height: 36px;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  font-size: 18px;
+}
+.logo-text { font-size: 20px; font-weight: 700; letter-spacing: -.4px; }
+.logo-text span { color: var(--accent); }
+.badge-version {
+  font-family: var(--mono);
+  font-size: 10px;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  color: var(--text2);
+  padding: 3px 8px;
+  border-radius: 20px;
+  letter-spacing: .5px;
+}
+
+/* ── Hero ── */
+.hero { text-align: center; margin-bottom: 64px; }
+.hero-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--teal);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  margin-bottom: 20px;
+  padding: 6px 14px;
+  background: rgba(20,184,166,.08);
+  border: 1px solid rgba(20,184,166,.2);
+  border-radius: 20px;
+}
+.hero h1 {
+  font-size: clamp(36px,5vw,58px);
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: -1.5px;
+  margin-bottom: 20px;
+}
+.hero h1 .grad {
+  background: linear-gradient(135deg, #60a5fa 0%, #818cf8 50%, #34d399 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.hero p {
+  font-size: 17px;
+  color: var(--text2);
+  line-height: 1.7;
+  max-width: 600px;
+  margin: 0 auto 36px;
+}
+
+/* ── Steps indicator ── */
+.steps {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  margin-bottom: 48px;
+  flex-wrap: wrap;
+}
+.step-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-radius: 10px;
+  cursor: default;
+  transition: all .3s;
+  position: relative;
+}
+.step-item.active { background: rgba(59,130,246,.1); }
+.step-item.done .step-num { background: var(--green); border-color: var(--green); color: #000; }
+.step-item.done .step-label { color: var(--green); }
+.step-num {
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border2);
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--mono);
+  color: var(--text2);
+  transition: all .3s;
+  flex-shrink: 0;
+}
+.step-item.active .step-num {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 0 16px rgba(59,130,246,.4);
+}
+.step-label { font-size: 13px; color: var(--text2); white-space: nowrap; }
+.step-item.active .step-label { color: var(--text); font-weight: 500; }
+.step-arrow { color: var(--border2); font-size: 14px; padding: 0 4px; }
+
+/* ── Cards ── */
+.card {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 32px;
+  margin-bottom: 24px;
+  position: relative;
+  overflow: hidden;
+  transition: border-color .3s;
+}
+.card:hover { border-color: var(--border2); }
+.card-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.card-icon {
+  width: 44px; height: 44px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  font-size: 20px;
+  flex-shrink: 0;
+}
+.card-icon.blue  { background: rgba(59,130,246,.12);  border: 1px solid rgba(59,130,246,.2); }
+.card-icon.teal  { background: rgba(20,184,166,.12);  border: 1px solid rgba(20,184,166,.2); }
+.card-icon.green { background: rgba(34,197,94,.12);   border: 1px solid rgba(34,197,94,.2); }
+.card-icon.red   { background: rgba(239,68,68,.12);   border: 1px solid rgba(239,68,68,.2); }
+.card-icon.yellow{ background: rgba(245,158,11,.12);  border: 1px solid rgba(245,158,11,.2); }
+.card-title { font-size: 18px; font-weight: 700; letter-spacing: -.3px; margin-bottom: 4px; }
+.card-subtitle { font-size: 13px; color: var(--text2); line-height: 1.5; }
+
+/* ── Upload Zone ── */
+.upload-zone {
+  border: 2px dashed var(--border2);
+  border-radius: 14px;
+  padding: 56px 32px;
+  text-align: center;
+  cursor: pointer;
+  transition: all .3s;
+  position: relative;
+  background: rgba(255,255,255,.01);
+}
+.upload-zone:hover, .upload-zone.drag-over {
+  border-color: var(--accent);
+  background: rgba(59,130,246,.04);
+}
+.upload-zone input[type=file] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  width: 100%;
+  height: 100%;
+}
+.upload-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+  display: block;
+}
+.upload-title { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
+.upload-sub { font-size: 13px; color: var(--text2); margin-bottom: 16px; }
+.upload-formats {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.format-tag {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 4px 10px;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  color: var(--text2);
+}
+
+/* ── File info bar ── */
+.file-info {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 20px;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 10px;
+  margin-top: 16px;
+  display: none;
+}
+.file-info.show { display: flex; }
+.file-info-icon { font-size: 24px; }
+.file-info-name { font-size: 14px; font-weight: 600; }
+.file-info-meta { font-size: 12px; color: var(--text2); font-family: var(--mono); }
+.file-info-status {
+  margin-left: auto;
+  font-size: 12px;
+  font-family: var(--mono);
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+.status-loading { background: rgba(245,158,11,.12); color: var(--yellow); border: 1px solid rgba(245,158,11,.2); }
+.status-ok      { background: rgba(34,197,94,.12);  color: var(--green);  border: 1px solid rgba(34,197,94,.2); }
+.status-error   { background: rgba(239,68,68,.12);  color: var(--red);    border: 1px solid rgba(239,68,68,.2); }
+
+/* ── Progress bar ── */
+.progress-wrap { margin: 20px 0; display: none; }
+.progress-wrap.show { display: block; }
+.progress-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text2);
+  font-family: var(--mono);
+  margin-bottom: 8px;
+}
+.progress-track {
+  height: 4px;
+  background: var(--bg3);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--teal));
+  border-radius: 4px;
+  transition: width .4s cubic-bezier(.4,0,.2,1);
+  width: 0%;
+}
+
+/* ── Data Preview Table ── */
+.preview-wrap {
+  overflow-x: auto;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  margin-top: 20px;
+}
+.preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  font-family: var(--mono);
+  min-width: 600px;
+}
+.preview-table th {
+  background: var(--bg3);
+  padding: 10px 14px;
+  text-align: left;
+  color: var(--text2);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+}
+.preview-table td {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.preview-table tr:last-child td { border-bottom: none; }
+.preview-table tr:hover td { background: var(--bg2); }
+.preview-table td.cell-null { color: var(--text3); font-style: italic; }
+.preview-table td.cell-error { color: var(--red); background: rgba(239,68,68,.06); }
+.preview-table td.cell-warn  { color: var(--yellow); background: rgba(245,158,11,.06); }
+
+/* ── Column type badges ── */
+.col-type {
+  display: inline-block;
+  font-size: 9px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-left: 6px;
+  font-family: var(--mono);
+  vertical-align: middle;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+}
+.col-type.num  { background: rgba(59,130,246,.15); color: #93c5fd; border: 1px solid rgba(59,130,246,.25); }
+.col-type.str  { background: rgba(20,184,166,.15); color: #5eead4; border: 1px solid rgba(20,184,166,.25); }
+.col-type.mix  { background: rgba(245,158,11,.15); color: #fcd34d; border: 1px solid rgba(245,158,11,.25); }
+.col-type.date { background: rgba(99,102,241,.15); color: #a5b4fc; border: 1px solid rgba(99,102,241,.25); }
+
+/* ── Diagnostik section ── */
+.diag-section { margin-bottom: 32px; }
+.diag-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text2);
+  font-family: var(--mono);
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ── Finding items ── */
+.finding {
+  display: flex;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  margin-bottom: 10px;
+  animation: slideIn .3s ease both;
+}
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.finding.fatal   { background: rgba(239,68,68,.07);   border-color: rgba(239,68,68,.2); }
+.finding.warning { background: rgba(245,158,11,.07);  border-color: rgba(245,158,11,.2); }
+.finding.info    { background: rgba(59,130,246,.07);  border-color: rgba(59,130,246,.2); }
+.finding.ok      { background: rgba(34,197,94,.07);   border-color: rgba(34,197,94,.2); }
+.finding-icon { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+.finding-body { flex: 1; }
+.finding-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  line-height: 1.4;
+}
+.finding.fatal   .finding-title { color: #fca5a5; }
+.finding.warning .finding-title { color: #fcd34d; }
+.finding.info    .finding-title { color: #93c5fd; }
+.finding.ok      .finding-title { color: #86efac; }
+.finding-desc {
+  font-size: 13px;
+  color: var(--text2);
+  line-height: 1.6;
+}
+.finding-desc code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  background: rgba(255,255,255,.06);
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--text);
+}
+.finding-meta {
+  margin-top: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text3);
+}
+
+/* ── Stats grid ── */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.stat-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+}
+.stat-value {
+  font-size: 28px;
+  font-weight: 700;
+  font-family: var(--mono);
+  line-height: 1;
+  margin-bottom: 4px;
+}
+.stat-label { font-size: 12px; color: var(--text2); }
+.stat-card.red    .stat-value { color: var(--red); }
+.stat-card.yellow .stat-value { color: var(--yellow); }
+.stat-card.green  .stat-value { color: var(--green); }
+.stat-card.blue   .stat-value { color: var(--accent); }
+.stat-card.teal   .stat-value { color: var(--teal); }
+
+/* ── Column detail table ── */
+.col-detail {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  margin-top: 12px;
+}
+.col-detail th {
+  text-align: left;
+  padding: 8px 12px;
+  background: var(--bg3);
+  color: var(--text2);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.col-detail td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.col-detail tr:last-child td { border-bottom: none; }
+.col-detail tr:hover td { background: var(--bg2); }
+
+/* ── Missing bar ── */
+.missing-bar-wrap { display: flex; align-items: center; gap: 8px; }
+.missing-bar-track {
+  flex: 1;
+  height: 6px;
+  background: var(--bg3);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.missing-bar-fill { height: 100%; border-radius: 3px; transition: width .6s ease; }
+.missing-pct { font-family: var(--mono); font-size: 11px; color: var(--text2); min-width: 36px; text-align: right; }
+
+/* ── Outlier pills ── */
+.outlier-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.outlier-pill {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 3px 8px;
+  background: rgba(239,68,68,.1);
+  border: 1px solid rgba(239,68,68,.2);
+  color: #fca5a5;
+  border-radius: 5px;
+}
+
+/* ── Buttons ── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 24px;
+  border-radius: 10px;
+  border: none;
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all .25s;
+  text-decoration: none;
+}
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #fff;
+  box-shadow: 0 0 24px rgba(59,130,246,.3);
+}
+.btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 0 32px rgba(59,130,246,.45);
+}
+.btn-primary:disabled {
+  opacity: .4;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+.btn-ghost {
+  background: transparent;
+  color: var(--text2);
+  border: 1px solid var(--border2);
+}
+.btn-ghost:hover { background: var(--bg2); color: var(--text); }
+.btn-sm { padding: 8px 16px; font-size: 13px; }
+
+/* ── Gate ── */
+.gate {
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 14px;
+  padding: 28px 32px;
+  margin-top: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.gate-text { flex: 1; }
+.gate-title { font-size: 16px; font-weight: 700; margin-bottom: 6px; }
+.gate-desc  { font-size: 13px; color: var(--text2); line-height: 1.6; }
+
+/* ── Summary badge strip ── */
+.summary-strip {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 24px;
+}
+.sum-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid transparent;
+}
+.sum-badge.fatal   { background: rgba(239,68,68,.1);  border-color: rgba(239,68,68,.25);  color: #fca5a5; }
+.sum-badge.warning { background: rgba(245,158,11,.1); border-color: rgba(245,158,11,.25); color: #fcd34d; }
+.sum-badge.info    { background: rgba(59,130,246,.1); border-color: rgba(59,130,246,.25); color: #93c5fd; }
+.sum-badge.ok      { background: rgba(34,197,94,.1);  border-color: rgba(34,197,94,.25);  color: #86efac; }
+.sum-num { font-family: var(--mono); font-weight: 700; }
+
+/* ── Section visibility ── */
+.section { display: none; }
+.section.active { display: block; animation: fadeIn .4s ease; }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+/* ── Toast ── */
+.toast {
+  position: fixed;
+  bottom: 28px;
+  right: 28px;
+  padding: 14px 20px;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  font-size: 13px;
+  z-index: 999;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  transform: translateY(100px);
+  opacity: 0;
+  transition: all .3s cubic-bezier(.34,1.56,.64,1);
+  max-width: 340px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.5);
+}
+.toast.show { transform: translateY(0); opacity: 1; }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg1); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+/* ── Chip ── */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-family: var(--mono);
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  color: var(--text2);
+}
+
+/* ── Responsive ── */
+@media (max-width: 640px) {
+  .hero h1 { font-size: 32px; }
+  .card { padding: 20px; }
+  .gate { flex-direction: column; }
+  .steps { gap: 0; }
+  .step-arrow { display: none; }
+}
+
+/* ══════════════════════════════════════
+   SPRINT 2 — Validitas & Reliabilitas
+══════════════════════════════════════ */
+
+/* Konstruk builder */
+.konstruk-list { display:flex; flex-direction:column; gap:14px; margin-bottom:20px; }
+
+.konstruk-card {
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  overflow: hidden;
+  transition: border-color .25s;
+}
+.konstruk-card:hover { border-color: var(--accent); }
+
+.konstruk-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  background: var(--bg3);
+  border-bottom: 1px solid var(--border);
+}
+.konstruk-num {
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  display: grid; place-items: center;
+  font-size: 12px; font-weight: 700; color: #fff;
+  flex-shrink: 0;
+}
+.konstruk-name-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.konstruk-name-input::placeholder { color: var(--text3); }
+.konstruk-del {
+  background: transparent;
+  border: none;
+  color: var(--text3);
+  cursor: pointer;
+  font-size: 16px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: all .2s;
+}
+.konstruk-del:hover { background: rgba(239,68,68,.15); color: var(--red); }
+
+.konstruk-body { padding: 16px 18px; }
+
+.item-pool-label {
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--text2);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+
+.item-checkgrid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.item-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border2);
+  background: var(--bg3);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text2);
+  transition: all .2s;
+  user-select: none;
+}
+.item-chip:hover { border-color: var(--accent); color: var(--text); }
+.item-chip.selected {
+  border-color: var(--accent);
+  background: rgba(59,130,246,.12);
+  color: #93c5fd;
+}
+.item-chip.selected::before { content: '✓ '; color: var(--accent); }
+.item-chip.used-elsewhere {
+  opacity: .4;
+  cursor: not-allowed;
+  border-style: dashed;
+}
+
+/* Hasil uji */
+.konstruk-result {
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+.konstruk-result-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  background: var(--bg3);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.konstruk-result-name {
+  font-size: 15px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.konstruk-result-badges { display:flex; gap:8px; flex-wrap:wrap; }
+
+.metric-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--mono);
+  border: 1px solid transparent;
+}
+.metric-badge.good   { background:rgba(34,197,94,.1);  border-color:rgba(34,197,94,.3);  color:#86efac; }
+.metric-badge.warn   { background:rgba(245,158,11,.1); border-color:rgba(245,158,11,.3); color:#fcd34d; }
+.metric-badge.bad    { background:rgba(239,68,68,.1);  border-color:rgba(239,68,68,.3);  color:#fca5a5; }
+.metric-badge.info   { background:rgba(59,130,246,.1); border-color:rgba(59,130,246,.3); color:#93c5fd; }
+
+/* Item validity table */
+.validity-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.validity-table th {
+  padding: 10px 16px;
+  text-align: left;
+  background: var(--bg2);
+  color: var(--text2);
+  font-weight: 500;
+  font-family: var(--mono);
+  font-size: 11px;
+  border-bottom: 1px solid var(--border);
+}
+.validity-table td {
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.validity-table tr:last-child td { border-bottom: none; }
+.validity-table tr:hover td { background: var(--bg2); }
+
+.r-bar-wrap { display:flex; align-items:center; gap:8px; }
+.r-bar-track {
+  width: 80px; height: 6px;
+  background: var(--bg3);
+  border-radius: 3px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.r-bar-fill { height:100%; border-radius:3px; }
+.r-val {
+  font-family: var(--mono);
+  font-size: 12px;
+  min-width: 44px;
+}
+
+.valid-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 6px;
+}
+.valid-dot.valid   { background:rgba(34,197,94,.1);  color:#86efac; }
+.valid-dot.invalid { background:rgba(239,68,68,.1);  color:#fca5a5; }
+.valid-dot.border  { background:rgba(245,158,11,.1); color:#fcd34d; }
+
+/* Alpha gauge */
+.alpha-gauge-wrap {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
+  background: var(--bg2);
+  border-top: 1px solid var(--border);
+}
+.alpha-gauge-track {
+  flex: 1;
+  height: 8px;
+  background: var(--bg3);
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+}
+.alpha-gauge-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width .8s cubic-bezier(.4,0,.2,1);
+}
+.alpha-gauge-markers {
+  position: relative;
+  height: 16px;
+  margin-top: 4px;
+}
+.alpha-marker {
+  position: absolute;
+  font-size: 9px;
+  color: var(--text3);
+  font-family: var(--mono);
+  transform: translateX(-50%);
+}
+.alpha-label {
+  font-size: 11px;
+  color: var(--text2);
+  min-width: 120px;
+}
+.alpha-value {
+  font-size: 24px;
+  font-weight: 700;
+  font-family: var(--mono);
+  min-width: 60px;
+  text-align: right;
+}
+
+/* Insight box */
+.insight-box {
+  margin: 12px 16px 16px;
+  padding: 12px 16px;
+  background: rgba(59,130,246,.05);
+  border: 1px solid rgba(59,130,246,.15);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text2);
+  line-height: 1.6;
+}
+.insight-box strong { color: var(--text); }
+.insight-box.warn-box {
+  background: rgba(245,158,11,.05);
+  border-color: rgba(245,158,11,.15);
+}
+.insight-box.ok-box {
+  background: rgba(34,197,94,.05);
+  border-color: rgba(34,197,94,.15);
+}
+
+/* Acknowledgement choices */
+.ack-choices { display:flex; flex-direction:column; gap:10px; margin:16px 0; }
+.ack-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 18px;
+  background: var(--bg2);
+  border: 1.5px solid var(--border2);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all .2s;
+}
+.ack-choice:hover { border-color: var(--accent); }
+.ack-choice.selected { border-color: var(--accent); background: rgba(59,130,246,.08); }
+.ack-choice input[type=radio] { margin-top: 2px; accent-color: var(--accent); }
+.ack-choice-text { font-size: 13px; line-height: 1.5; color: var(--text2); }
+.ack-choice.selected .ack-choice-text { color: var(--text); }
+
+
+/* ══════════════════════════════════════
+   SPRINT 3 — ANALISIS UTAMA
+══════════════════════════════════════ */
+
+/* Variable selector */
+.var-selector-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+  margin: 12px 0 20px;
+}
+.var-card {
+  padding: 12px 14px;
+  border: 1.5px solid var(--border2);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all .2s;
+  background: var(--bg2);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.var-card:hover { border-color: var(--accent); background: rgba(59,130,246,.06); }
+.var-card.sel-y  { border-color: var(--red);    background: rgba(239,68,68,.08); }
+.var-card.sel-x  { border-color: var(--teal);   background: rgba(20,184,166,.08); }
+.var-card.sel-m  { border-color: var(--yellow);  background: rgba(245,158,11,.08); }
+.var-card.sel-z  { border-color: var(--accent2); background: rgba(99,102,241,.08); }
+.var-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: var(--border2);
+  flex-shrink: 0;
+  transition: background .2s;
+}
+.var-card.sel-y  .var-dot { background: var(--red); }
+.var-card.sel-x  .var-dot { background: var(--teal); }
+.var-card.sel-m  .var-dot { background: var(--yellow); }
+.var-card.sel-z  .var-dot { background: var(--accent2); }
+.var-name { font-size: 12.5px; font-family: var(--mono); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.var-badge-role {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 5px;
+  flex-shrink: 0;
+}
+.role-y  { background: rgba(239,68,68,.2);   color:#fca5a5; }
+.role-x  { background: rgba(20,184,166,.2);  color:#5eead4; }
+.role-m  { background: rgba(245,158,11,.2);  color:#fcd34d; }
+.role-z  { background: rgba(99,102,241,.2);  color:#a5b4fc; }
+
+/* Role legend */
+.role-legend {
+  display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px;
+}
+.role-pill {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 12px; font-weight: 600;
+  cursor: pointer;
+  transition: all .2s;
+  border: 1.5px solid transparent;
+}
+.role-pill.active-y  { border-color: var(--red);    background: rgba(239,68,68,.1);   color:#fca5a5; }
+.role-pill.active-x  { border-color: var(--teal);   background: rgba(20,184,166,.1);  color:#5eead4; }
+.role-pill.active-m  { border-color: var(--yellow);  background: rgba(245,158,11,.1);  color:#fcd34d; }
+.role-pill.active-z  { border-color: var(--accent2); background: rgba(99,102,241,.1);  color:#a5b4fc; }
+.role-pill.inactive  { border-color: var(--border2); background: var(--bg2); color: var(--text2); }
+.role-pill .role-count {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: rgba(255,255,255,.1);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+/* Alat uji selector */
+.alat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+.alat-card {
+  border: 1.5px solid var(--border2);
+  border-radius: 12px;
+  padding: 16px;
+  cursor: pointer;
+  transition: all .25s;
+  background: var(--bg2);
+  position: relative;
+}
+.alat-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+.alat-card.selected {
+  border-color: var(--accent);
+  background: rgba(59,130,246,.1);
+  box-shadow: 0 0 20px rgba(59,130,246,.15);
+}
+.alat-card.disabled-card { opacity:.35; cursor:not-allowed; pointer-events:none; }
+.alat-card.recommended::before {
+  content: '⭐ Direkomendasikan';
+  position: absolute;
+  top: -1px; right: 12px;
+  font-size: 9px;
+  font-weight: 700;
+  background: linear-gradient(135deg,var(--accent),var(--accent2));
+  color: #fff;
+  padding: 3px 8px;
+  border-radius: 0 0 6px 6px;
+  letter-spacing: .5px;
+}
+.alat-icon { font-size: 26px; margin-bottom: 10px; }
+.alat-name { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+.alat-desc { font-size: 12px; color: var(--text2); line-height: 1.5; }
+.alat-req  { margin-top: 8px; font-size: 11px; font-family: var(--mono); color: var(--text3); }
+.alat-check {
+  position: absolute;
+  top: 12px; right: 12px;
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  border: 2px solid var(--border2);
+  display: grid; place-items: center;
+  font-size: 11px;
+  transition: all .2s;
+}
+.alat-card.selected .alat-check { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* Asumsi klasik */
+.asumsi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+  margin: 16px 0;
+}
+.asumsi-card {
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.asumsi-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 16px;
+  background: var(--bg3);
+  border-bottom: 1px solid var(--border);
+}
+.asumsi-title { font-size: 13px; font-weight: 600; flex: 1; }
+.asumsi-status-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: var(--border2);
+  flex-shrink: 0;
+}
+.asumsi-body { padding: 14px 16px; }
+.asumsi-metric { font-size: 22px; font-weight: 700; font-family: var(--mono); margin-bottom: 2px; }
+.asumsi-label  { font-size: 12px; color: var(--text2); margin-bottom: 8px; }
+.asumsi-verdict { font-size: 12.5px; line-height: 1.5; }
+
+/* Results */
+.result-section { margin-bottom: 28px; }
+.result-section-title {
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text2);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  padding-bottom: 10px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px;
+}
+
+/* Coef table */
+.coef-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.coef-table th {
+  padding: 10px 14px;
+  text-align: left;
+  background: var(--bg3);
+  color: var(--text2);
+  font-weight: 500;
+  font-family: var(--mono);
+  font-size: 11px;
+  border-bottom: 1px solid var(--border);
+}
+.coef-table td {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.coef-table tr:last-child td { border-bottom: none; }
+.coef-table tr:hover td { background: var(--bg2); }
+.coef-table td.mono { font-family: var(--mono); font-size: 12.5px; }
+.sig-star { color: var(--green); font-weight: 700; }
+.not-sig  { color: var(--text3); }
+
+/* Model fit strip */
+.model-fit {
+  display: flex; gap: 12px; flex-wrap: wrap;
+  padding: 16px;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 10px;
+  margin-bottom: 16px;
+}
+.fit-metric { text-align: center; flex: 1; min-width: 80px; }
+.fit-value { font-size: 22px; font-weight: 700; font-family: var(--mono); }
+.fit-label { font-size: 11px; color: var(--text2); margin-top: 2px; }
+
+/* Interpretasi narasi */
+.narasi-box {
+  background: linear-gradient(135deg, rgba(59,130,246,.05), rgba(99,102,241,.05));
+  border: 1px solid rgba(99,102,241,.2);
+  border-radius: 12px;
+  padding: 20px 24px;
+  margin-top: 16px;
+}
+.narasi-box h4 {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent2);
+  margin-bottom: 12px;
+  letter-spacing: .5px;
+  text-transform: uppercase;
+  font-family: var(--mono);
+}
+.narasi-para {
+  font-size: 14px;
+  line-height: 1.8;
+  color: var(--text);
+  margin-bottom: 12px;
+}
+.narasi-para:last-child { margin-bottom: 0; }
+.narasi-highlight {
+  display: inline;
+  background: rgba(99,102,241,.15);
+  border-radius: 4px;
+  padding: 0 4px;
+  color: #a5b4fc;
+  font-weight: 600;
+}
+
+/* Sig indicator */
+.sig-bar { display:flex; align-items:center; gap:8px; }
+.sig-track { width:60px; height:5px; background:var(--bg3); border-radius:3px; overflow:hidden; }
+.sig-fill  { height:100%; border-radius:3px; }
+
+
+/* ══════════════════════════════════════
+   SPRINT 4 — LAPORAN & EXPORT
+══════════════════════════════════════ */
+
+.laporan-nav {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 24px;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  padding: 8px;
+}
+.laporan-nav-btn {
+  flex: 1;
+  min-width: 140px;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text2);
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all .2s;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: center;
+}
+.laporan-nav-btn:hover { background: var(--bg3); color: var(--text); }
+.laporan-nav-btn.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #fff;
+  box-shadow: 0 0 16px rgba(59,130,246,.3);
+}
+
+/* Laporan panels */
+.laporan-panel { display: none; }
+.laporan-panel.active { display: block; animation: fadeIn .3s ease; }
+
+/* Summary scorecard */
+.scorecard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.scorecard {
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.scorecard-icon { font-size: 24px; }
+.scorecard-value { font-size: 26px; font-weight: 800; font-family: var(--mono); }
+.scorecard-label { font-size: 12px; color: var(--text2); }
+.scorecard-sub   { font-size: 11px; color: var(--text3); font-family: var(--mono); }
+
+/* Timeline laporan */
+.laporan-timeline { display: flex; flex-direction: column; gap: 0; }
+.timeline-item {
+  display: flex;
+  gap: 16px;
+  position: relative;
+}
+.timeline-item::before {
+  content: '';
+  position: absolute;
+  left: 19px;
+  top: 40px;
+  bottom: -8px;
+  width: 2px;
+  background: var(--border);
+}
+.timeline-item:last-child::before { display: none; }
+.timeline-dot {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 16px;
+  flex-shrink: 0;
+  border: 2px solid var(--border2);
+  background: var(--bg2);
+  margin-top: 8px;
+}
+.timeline-dot.ok     { border-color: var(--green);  background: rgba(34,197,94,.1); }
+.timeline-dot.warn   { border-color: var(--yellow); background: rgba(245,158,11,.1); }
+.timeline-dot.bad    { border-color: var(--red);    background: rgba(239,68,68,.1); }
+.timeline-content {
+  flex: 1;
+  padding: 12px 0 24px;
+}
+.timeline-title   { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+.timeline-body    { font-size: 13px; color: var(--text2); line-height: 1.6; }
+
+/* Narasi skripsi */
+.narasi-skripsi {
+  background: var(--bg1);
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.narasi-skripsi-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  background: var(--bg3);
+  border-bottom: 1px solid var(--border);
+}
+.narasi-skripsi-title { font-size: 14px; font-weight: 600; }
+.narasi-skripsi-body {
+  padding: 20px 24px;
+  font-size: 14px;
+  line-height: 1.9;
+  color: var(--text);
+  font-family: 'Georgia', serif;
+}
+.narasi-skripsi-body p { margin-bottom: 14px; }
+.narasi-skripsi-body strong { color: var(--accent2); }
+
+/* Copy button */
+.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--text2);
+  cursor: pointer;
+  font-family: var(--sans);
+  transition: all .2s;
+}
+.copy-btn:hover { background: var(--bg3); color: var(--text); }
+.copy-btn.copied { border-color: var(--green); color: var(--green); }
+
+/* Print / Export area */
+.export-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+.export-card {
+  background: var(--bg2);
+  border: 1.5px solid var(--border2);
+  border-radius: 12px;
+  padding: 20px;
+  text-align: center;
+  cursor: pointer;
+  transition: all .25s;
+}
+.export-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(59,130,246,.15);
+}
+.export-icon { font-size: 36px; margin-bottom: 10px; }
+.export-name { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+.export-desc { font-size: 12px; color: var(--text2); }
+
+/* Checklist validasi */
+.checklist { display:flex; flex-direction:column; gap:8px; }
+.check-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-size: 13px;
+}
+.check-item.ok   { background:rgba(34,197,94,.06);  border-color:rgba(34,197,94,.15); }
+.check-item.warn { background:rgba(245,158,11,.06); border-color:rgba(245,158,11,.15); }
+.check-item.bad  { background:rgba(239,68,68,.06);  border-color:rgba(239,68,68,.15); }
+.check-item.na   { background:rgba(99,102,241,.06); border-color:rgba(99,102,241,.15); }
+.check-icon { font-size:16px; flex-shrink:0; margin-top:1px; }
+.check-body { flex:1; }
+.check-title { font-weight:600; margin-bottom:3px; }
+.check-desc  { color: var(--text2); line-height:1.5; }
+
+/* Print styles */
+@media print {
+  .header, .hero, .steps, #sec-upload, #sec-validitas, #sec-analisis,
+  .laporan-nav, .gate, .btn, .export-grid, .blob { display:none !important; }
+  #sec-laporan { display:block !important; }
+  .laporan-panel { display:block !important; }
+  body { background:#fff; color:#000; }
+  .narasi-skripsi-body { color:#000; }
+}
+
+
+/* ══ Firebase / Session UI ══ */
+.session-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 10px;
+  margin-bottom: 20px;
+  font-size: 12.5px;
+  flex-wrap: wrap;
+}
+.session-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--border2);
+  flex-shrink: 0;
+  animation: pulse-dot 2s infinite;
+}
+.session-dot.online  { background: var(--green); }
+.session-dot.saving  { background: var(--yellow); }
+.session-dot.offline { background: var(--red); }
+@keyframes pulse-dot {
+  0%,100% { opacity:1; } 50% { opacity:.4; }
+}
+.session-label { color: var(--text2); flex: 1; }
+.session-label strong { color: var(--text); }
+.session-actions { display:flex; gap:6px; }
+
+/* Dosen dashboard link */
+.dosen-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--accent2);
+  text-decoration: none;
+  padding: 4px 10px;
+  border: 1px solid rgba(99,102,241,.3);
+  border-radius: 6px;
+  background: rgba(99,102,241,.08);
+  cursor: pointer;
+  transition: all .2s;
+}
+.dosen-link:hover { background: rgba(99,102,241,.15); }
+
+/* Progress restore banner */
+.restore-banner {
+  display: none;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 20px;
+  background: rgba(59,130,246,.08);
+  border: 1px solid rgba(59,130,246,.25);
+  border-radius: 12px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+.restore-banner.show { display: flex; animation: slideIn .4s ease; }
+
+/* Dashboard modal */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.7);
+  z-index: 100;
+  place-items: center;
+  backdrop-filter: blur(4px);
+}
+.modal-overlay.show { display: grid; }
+.modal-box {
+  background: var(--bg1);
+  border: 1px solid var(--border2);
+  border-radius: 16px;
+  padding: 28px;
+  width: min(700px, 95vw);
+  max-height: 85vh;
+  overflow-y: auto;
+  position: relative;
+}
+.modal-close {
+  position: absolute;
+  top: 16px; right: 16px;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  color: var(--text2);
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: all .2s;
+}
+.modal-close:hover { background: var(--bg2); color: var(--text); }
+
+/* Dashboard stats */
+.dash-stat-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 10px;
+  margin-bottom: 20px;
+}
+.dash-stat {
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 10px;
+  padding: 14px;
+  text-align: center;
+}
+.dash-stat-val   { font-size: 28px; font-weight: 800; font-family: var(--mono); }
+.dash-stat-label { font-size: 11px; color: var(--text2); margin-top: 2px; }
+
+.dash-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  margin-top: 12px;
+}
+.dash-table th {
+  padding: 8px 12px;
+  text-align: left;
+  background: var(--bg3);
+  color: var(--text2);
+  font-size: 11px;
+  font-family: var(--mono);
+  border-bottom: 1px solid var(--border);
+}
+.dash-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.dash-table tr:last-child td { border-bottom: none; }
+.dash-table tr:hover td { background: var(--bg2); }
+
+.step-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--mono);
+}
+.step-badge.s1 { background:rgba(59,130,246,.15); color:#93c5fd; }
+.step-badge.s2 { background:rgba(20,184,166,.15);  color:#5eead4; }
+.step-badge.s3 { background:rgba(245,158,11,.15);  color:#fcd34d; }
+.step-badge.s4 { background:rgba(34,197,94,.15);   color:#86efac; }
+
+</style>
+</head>
+<body>
+
+<div class="blob blob-1"></div>
+<div class="blob blob-2"></div>
+<div class="blob blob-3"></div>
+
+<div id="app">
+
+    <!-- Session Bar (injected after hero) -->
+    <div class="session-bar" id="session-bar">
+      <div class="session-dot" id="session-dot"></div>
+      <div class="session-label" id="session-label">Menghubungkan ke server…</div>
+      <div class="session-actions">
+        <button class="btn btn-ghost btn-sm" onclick="saveSessionFB(true)" style="padding:5px 12px;font-size:11px;">💾 Simpan</button>
+        <span class="dosen-link" onclick="openDashboard()">👨‍🏫 Dashboard Dosen</span>
+      </div>
+    </div>
+
+    <!-- Restore Banner -->
+    <div class="restore-banner" id="restore-banner">
+      <span style="font-size:24px;">🔄</span>
+      <div style="flex:1;">
+        <div style="font-size:14px;font-weight:700;margin-bottom:3px;">Sesi sebelumnya ditemukan</div>
+        <div style="font-size:12.5px;color:var(--text2);" id="restore-info">Klik untuk melanjutkan dari titik terakhir.</div>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-primary btn-sm" onclick="loadSessionFB()">Lanjutkan →</button>
+        <button class="btn btn-ghost btn-sm"   onclick="dismissRestore()">Mulai Baru</button>
+      </div>
+    </div>
+
+    <!-- Dashboard Modal -->
+    <div class="modal-overlay" id="dash-modal">
+      <div class="modal-box">
+        <button class="modal-close" onclick="closeDashboard()">✕ Tutup</button>
+        <div style="margin-bottom:20px;">
+          <div style="font-size:20px;font-weight:800;margin-bottom:4px;">👨‍🏫 Dashboard Dosen</div>
+          <div style="font-size:13px;color:var(--text2);">Aktivitas mahasiswa secara real-time</div>
+        </div>
+        <div id="dash-content">
+          <div style="color:var(--text2);font-size:13px;">Memuat data…</div>
+        </div>
+      </div>
+    </div>
+
+
+  <!-- Header -->
+  <header class="header">
+    <div class="logo">
+      <div class="logo-icon">📊</div>
+      <div class="logo-text">Stat<span>Lab</span></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <span class="badge-version">v1.0 · Sprint 1</span>
+    </div>
+  </header>
+
+  <!-- Hero -->
+  <div class="hero">
+    <div class="hero-eyebrow">
+      <span>◆</span> Asisten Analisis Penelitian
+    </div>
+    <h1>Analisis Data Penelitianmu<br>dengan <span class="grad">Lebih Percaya Diri</span></h1>
+    <p>Upload file Excel-mu, dan StatLab akan mendiagnosis kualitas data secara menyeluruh — sebelum kamu melangkah ke analisis statistik.</p>
+  </div>
+
+  <!-- Steps -->
+  <div class="steps">
+    <div class="step-item active" id="step-1">
+      <div class="step-num">1</div>
+      <div class="step-label">Upload & Diagnostik Data</div>
+    </div>
+    <div class="step-arrow">→</div>
+    <div class="step-item" id="step-2">
+      <div class="step-num">2</div>
+      <div class="step-label">Validitas & Reliabilitas</div>
+    </div>
+    <div class="step-arrow">→</div>
+    <div class="step-item" id="step-3">
+      <div class="step-num">3</div>
+      <div class="step-label">Analisis Utama</div>
+    </div>
+    <div class="step-arrow">→</div>
+    <div class="step-item" id="step-4">
+      <div class="step-num">4</div>
+      <div class="step-label">Output & Laporan</div>
+    </div>
+  </div>
+
+  <!-- ═══ SECTION 1: UPLOAD ═══ -->
+  <div class="section active" id="sec-upload">
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon blue">📁</div>
+        <div>
+          <div class="card-title">Upload File Data</div>
+          <div class="card-subtitle">Mendukung format Excel (.xlsx, .xls) dan CSV. StatLab akan membaca struktur file secara otomatis.</div>
+        </div>
+      </div>
+
+      <div class="upload-zone" id="upload-zone">
+        <input type="file" id="file-input" accept=".xlsx,.xls,.csv">
+        <span class="upload-icon">📂</span>
+        <div class="upload-title">Seret file ke sini atau klik untuk memilih</div>
+        <div class="upload-sub">Ukuran maksimum 50MB. Semua data diproses di browser — tidak dikirim ke server manapun.</div>
+        <div class="upload-formats">
+          <span class="format-tag">.xlsx</span>
+          <span class="format-tag">.xls</span>
+          <span class="format-tag">.csv</span>
+        </div>
+      </div>
+
+      <div class="file-info" id="file-info">
+        <div class="file-info-icon">📄</div>
+        <div>
+          <div class="file-info-name" id="fi-name">—</div>
+          <div class="file-info-meta" id="fi-meta">—</div>
+        </div>
+        <div class="file-info-status status-loading" id="fi-status">Memproses…</div>
+      </div>
+
+      <div class="progress-wrap" id="progress-wrap">
+        <div class="progress-label">
+          <span id="prog-label">Membaca file…</span>
+          <span id="prog-pct">0%</span>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill" id="prog-fill"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Sheet selector (muncul jika multi-sheet) -->
+    <div class="card" id="card-sheet" style="display:none;">
+      <div class="card-header">
+        <div class="card-icon yellow">📋</div>
+        <div>
+          <div class="card-title">File Memiliki Beberapa Sheet</div>
+          <div class="card-subtitle">Pilih sheet yang berisi data penelitianmu.</div>
+        </div>
+      </div>
+      <div id="sheet-list" style="display:flex;flex-wrap:wrap;gap:10px;"></div>
+    </div>
+
+    <!-- Preview -->
+    <div class="card" id="card-preview" style="display:none;">
+      <div class="card-header">
+        <div class="card-icon teal">👁</div>
+        <div>
+          <div class="card-title">Preview Data</div>
+          <div class="card-subtitle" id="preview-subtitle">—</div>
+        </div>
+      </div>
+      <div class="preview-wrap" id="preview-wrap"></div>
+      <div style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <button class="btn btn-ghost btn-sm" onclick="runDiagnostic()">▶ Jalankan Diagnostik</button>
+        <span style="font-size:12px;color:var(--text2);">Menampilkan 5 baris pertama · semua kolom akan dianalisis</span>
+      </div>
+    </div>
+
+    <!-- Diagnostik hasil -->
+    <div id="diag-result" style="display:none;"></div>
+  </div>
+
+
+  <!-- ═══ SECTION 2: VALIDITAS & RELIABILITAS ═══ -->
+  <div class="section" id="sec-validitas">
+
+    <!-- Intro card -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon teal">🧪</div>
+        <div>
+          <div class="card-title">Tahap 2 — Uji Validitas &amp; Reliabilitas</div>
+          <div class="card-subtitle">Definisikan konstruk penelitianmu dan tandai item mana yang mengukur masing-masing konstruk. StatLab akan menghitung validitas dan reliabilitas setiap konstruk secara otomatis.</div>
+        </div>
+      </div>
+
+      <!-- Info strip -->
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px;">
+        <div class="chip">📋 <span id="s2-col-count">0</span> kolom tersedia</div>
+        <div class="chip">👥 <span id="s2-row-count">0</span> responden</div>
+        <div class="chip">🔵 Batas valid: r ≥ 0.3</div>
+        <div class="chip">🟡 Batas reliabel: α ≥ 0.6</div>
+      </div>
+
+      <!-- Guide -->
+      <div class="insight-box" style="margin:0 0 20px;">
+        <strong>Cara menggunakan:</strong> Klik <em>"+ Tambah Konstruk"</em> untuk setiap variabel laten dalam penelitianmu (misalnya: Motivasi Kerja, Kinerja Karyawan, dll). Beri nama konstruk, lalu centang kolom-kolom mana yang merupakan item pengukurnya. Setiap item hanya bisa masuk ke satu konstruk.
+      </div>
+
+      <!-- Konstruk builder -->
+      <div class="konstruk-list" id="konstruk-list"></div>
+
+      <button class="btn btn-ghost" onclick="addKonstruk()" style="margin-bottom:20px;">
+        + Tambah Konstruk
+      </button>
+
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <button class="btn btn-primary" id="btn-run-validitas" onclick="runValiditas()" disabled>
+          ▶ Jalankan Uji Validitas &amp; Reliabilitas
+        </button>
+        <button class="btn btn-ghost" onclick="backToStep1()">← Kembali</button>
+      </div>
+    </div>
+
+    <!-- Hasil -->
+    <div id="validitas-result" style="display:none;"></div>
+
+  </div>
+
+  <!-- ═══ SECTION 3: ANALISIS UTAMA ═══ -->
+  <div class="section" id="sec-analisis">
+    <div class="card" id="card-var-selector">
+      <div class="card-header">
+        <div class="card-icon red">🎯</div>
+        <div>
+          <div class="card-title">Tahap 3 — Analisis Utama</div>
+          <div class="card-subtitle">Tentukan peran setiap variabel, kemudian pilih alat uji yang sesuai.</div>
+        </div>
+      </div>
+      <div class="insight-box" style="margin:0 0 20px;">
+        <strong>Cara menggunakan:</strong> Pilih mode peran di bawah, lalu klik variabel yang ingin diberi peran.
+        <code>Y</code> = Variabel terikat &nbsp;·&nbsp;
+        <code>X</code> = Variabel bebas &nbsp;·&nbsp;
+        <code>M</code> = Moderator/Mediator &nbsp;·&nbsp;
+        <code>Z</code> = Kontrol
+      </div>
+      <div class="role-legend" id="role-legend">
+        <div class="role-pill active-y" id="rpill-y" onclick="setActiveRole('y')">
+          <span>Y</span><span>Variabel Terikat</span><span class="role-count" id="cnt-y">0</span>
+        </div>
+        <div class="role-pill inactive" id="rpill-x" onclick="setActiveRole('x')">
+          <span>X</span><span>Variabel Bebas</span><span class="role-count" id="cnt-x">0</span>
+        </div>
+        <div class="role-pill inactive" id="rpill-m" onclick="setActiveRole('m')">
+          <span>M</span><span>Moderator/Mediator</span><span class="role-count" id="cnt-m">0</span>
+        </div>
+        <div class="role-pill inactive" id="rpill-z" onclick="setActiveRole('z')">
+          <span>Z</span><span>Kontrol</span><span class="role-count" id="cnt-z">0</span>
+        </div>
+        <div class="role-pill inactive" id="rpill-none" onclick="setActiveRole('none')">
+          <span>✕</span><span>Hapus Peran</span>
+        </div>
+      </div>
+      <div class="var-selector-grid" id="var-selector-grid"></div>
+      <div id="var-summary" style="margin-bottom:16px;"></div>
+      <button class="btn btn-primary" id="btn-to-alat" onclick="showAlatUji()" disabled>
+        Pilih Alat Uji →
+      </button>
+      <button class="btn btn-ghost" style="margin-left:10px;" onclick="backToStep2()">← Kembali</button>
+    </div>
+
+    <div id="card-alat-uji" style="display:none;">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-icon blue">🔬</div>
+          <div>
+            <div class="card-title">Pilih Alat Uji Statistik</div>
+            <div class="card-subtitle" id="alat-subtitle">Pilih alat uji yang sesuai.</div>
+          </div>
+        </div>
+        <div class="alat-grid" id="alat-grid"></div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;">
+          <button class="btn btn-primary" id="btn-run-analisis" onclick="runAnalisis()" disabled>
+            ▶ Jalankan Analisis
+          </button>
+          <button class="btn btn-ghost" onclick="backToVarSelector()">← Ubah Variabel</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="analisis-result" style="display:none;"></div>
+  </div>
+
+  <!-- ═══ SECTION 4: LAPORAN & EXPORT ═══ -->
+  <div class="section" id="sec-laporan">
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon green">📄</div>
+        <div>
+          <div class="card-title">Tahap 4 — Laporan &amp; Export</div>
+          <div class="card-subtitle">Ringkasan lengkap, narasi siap pakai, dan export hasil.</div>
+        </div>
+      </div>
+      <div class="laporan-nav">
+        <button class="laporan-nav-btn active" onclick="switchLaporan('ringkasan')" id="lnav-ringkasan">📊 Ringkasan Eksekutif</button>
+        <button class="laporan-nav-btn" onclick="switchLaporan('validasi')"  id="lnav-validasi">✅ Validasi Menyeluruh</button>
+        <button class="laporan-nav-btn" onclick="switchLaporan('narasi')"    id="lnav-narasi">📝 Narasi Skripsi</button>
+        <button class="laporan-nav-btn" onclick="switchLaporan('export')"    id="lnav-export">⬇️ Export</button>
+      </div>
+      <div class="laporan-panel active" id="lpanel-ringkasan">
+        <div id="ringkasan-content"><div style="color:var(--text2);font-size:13px;padding:20px 0;">Jalankan analisis terlebih dahulu.</div></div>
+      </div>
+      <div class="laporan-panel" id="lpanel-validasi">
+        <div id="validasi-content"><div style="color:var(--text2);font-size:13px;padding:20px 0;">Selesaikan semua tahap.</div></div>
+      </div>
+      <div class="laporan-panel" id="lpanel-narasi">
+        <div id="narasi-content"><div style="color:var(--text2);font-size:13px;padding:20px 0;">Selesaikan analisis untuk mendapatkan narasi.</div></div>
+      </div>
+      <div class="laporan-panel" id="lpanel-export">
+        <div class="insight-box" style="margin:0 0 20px;">Semua proses berjalan di browser — tidak ada data yang dikirim ke server.</div>
+        <div class="export-grid">
+          <div class="export-card" onclick="exportPDF()">
+            <div class="export-icon">📄</div>
+            <div class="export-name">Cetak / PDF</div>
+            <div class="export-desc">Print atau simpan sebagai PDF</div>
+          </div>
+          <div class="export-card" onclick="exportNarasiTxt()">
+            <div class="export-icon">📝</div>
+            <div class="export-name">Narasi (.txt)</div>
+            <div class="export-desc">Download narasi interpretasi</div>
+          </div>
+          <div class="export-card" onclick="exportJSON()">
+            <div class="export-icon">🗄️</div>
+            <div class="export-name">Data Lengkap (.json)</div>
+            <div class="export-desc">Semua hasil analisis terstruktur</div>
+          </div>
+          <div class="export-card" onclick="exportCSVHasil()">
+            <div class="export-icon">📊</div>
+            <div class="export-name">Tabel Hasil (.csv)</div>
+            <div class="export-desc">Koefisien dalam format spreadsheet</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="gate" style="margin-top:0;">
+      <div class="gate-text">
+        <div class="gate-title">🎉 Proses analisis selesai!</div>
+        <div class="gate-desc">Gunakan narasi dan export di atas untuk melengkapi laporan penelitianmu.</div>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <button class="btn btn-ghost" onclick="backToStep3()">← Kembali ke Analisis</button>
+        <button class="btn btn-primary" onclick="mulaiUlang()">🔄 Mulai Analisis Baru</button>
+      </div>
+    </div>
+  </div>
+
+
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast">
+  <span id="toast-icon">ℹ️</span>
+  <span id="toast-msg">—</span>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════
+//  STATE
+// ═══════════════════════════════════════════════════
+const state = {
+  rawFile: null,
+  workbook: null,
+  activeSheet: null,
+  rawData: [],      // array of arrays (with header)
+  headers: [],
+  rows: [],         // array of objects
+  colMeta: [],      // per-column analysis
+  findings: [],
+};
+
+// ═══════════════════════════════════════════════════
+//  UTILS
+// ═══════════════════════════════════════════════════
+
+function showToast(msg, icon = 'ℹ️', duration = 3500) {
+  const t = $('toast');
+  $('toast-icon').textContent = icon;
+  $('toast-msg').textContent  = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), duration);
+}
+
+function setProgress(pct, label) {
+  $('prog-fill').style.width  = pct + '%';
+  $('prog-pct').textContent   = pct + '%';
+  $('prog-label').textContent = label;
+}
+
+function fmtBytes(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+  return (b/1048576).toFixed(1) + ' MB';
+}
+
+function fmtNum(n) {
+  return new Intl.NumberFormat('id-ID').format(n);
+}
+
+function isNumeric(v) {
+  if (v === null || v === undefined || v === '') return false;
+  return !isNaN(Number(v));
+}
+
+function isDateLike(v) {
+  if (typeof v !== 'string') return false;
+  return /\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}/.test(v) ||
+         /\d{4}[\/\-\.]\d{2}[\/\-\.]\d{2}/.test(v);
+}
+
+// ═══════════════════════════════════════════════════
+//  UPLOAD & PARSE
+// ═══════════════════════════════════════════════════
+let uploadZone, fileInput;
+document.addEventListener('DOMContentLoaded', function() {
+  uploadZone = document.getElementById('upload-zone');
+  fileInput  = document.getElementById('file-input');
+  if (uploadZone) {
+    uploadZone.addEventListener('dragover',  e => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
+    uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
+    uploadZone.addEventListener('drop', e => {
+      e.preventDefault();
+      uploadZone.classList.remove('drag-over');
+      const f = e.dataTransfer.files[0];
+      if (f) handleFile(f);
+    });
+  }
+  if (fileInput) {
+    fileInput.addEventListener('change', () => { if (fileInput.files[0]) handleFile(fileInput.files[0]); });
+  }
+});
+
+// Event listeners moved to DOMContentLoaded above
+
+function handleFile(file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (!['xlsx','xls','csv'].includes(ext)) {
+    showToast('Format tidak didukung. Gunakan .xlsx, .xls, atau .csv', '❌'); return;
+  }
+
+  state.rawFile = file;
+
+  // Show file info bar
+  const fi = $('file-info');
+  fi.classList.add('show');
+  $('fi-name').textContent = file.name;
+  $('fi-meta').textContent = `${fmtBytes(file.size)} · ${ext.toUpperCase()}`;
+  $('fi-status').className = 'file-info-status status-loading';
+  $('fi-status').textContent = 'Membaca…';
+
+  // Show progress
+  const pw = $('progress-wrap');
+  pw.classList.add('show');
+  setProgress(10, 'Membaca file…');
+
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      setProgress(35, 'Memparsing data…');
+      const data = new Uint8Array(e.target.result);
+      const wb   = XLSX.read(data, { type: 'array', cellDates: true });
+      state.workbook = wb;
+
+      setProgress(60, 'Menganalisis struktur…');
+
+      const sheets = wb.SheetNames;
+      if (sheets.length > 1) {
+        showSheetSelector(sheets);
+      } else {
+        loadSheet(sheets[0]);
+      }
+
+    } catch(err) {
+      $('fi-status').className = 'file-info-status status-error';
+      $('fi-status').textContent = 'Error membaca file';
+      showToast('Gagal membaca file: ' + err.message, '❌');
+      setProgress(0, '');
+      pw.classList.remove('show');
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function showSheetSelector(sheets) {
+  const card = $('card-sheet');
+  const list = $('sheet-list');
+  card.style.display = 'block';
+  list.innerHTML = '';
+  sheets.forEach((name, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-ghost btn-sm';
+    btn.innerHTML = `📋 ${name}`;
+    btn.onclick = () => {
+      document.querySelectorAll('#sheet-list .btn').forEach(b => b.classList.remove('btn-primary'));
+      btn.classList.add('btn-primary');
+      loadSheet(name);
+    };
+    list.appendChild(btn);
+    if (i === 0) { btn.classList.add('btn-primary'); loadSheet(name); }
+  });
+}
+
+function loadSheet(sheetName) {
+  state.activeSheet = sheetName;
+  const ws = state.workbook.Sheets[sheetName];
+
+  // Parse to array of arrays
+  const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: null });
+  if (!aoa || aoa.length === 0) {
+    showToast('Sheet kosong atau tidak bisa dibaca', '⚠️'); return;
+  }
+
+  state.rawData = aoa;
+
+  // Detect header row
+  const headerRowIdx = detectHeaderRow(aoa);
+  const headers = aoa[headerRowIdx] ? aoa[headerRowIdx].map((h,i) => h ? String(h).trim() : `Kolom_${i+1}`) : [];
+  state.headers = headers;
+
+  // Build rows as objects
+  const rows = [];
+  for (let r = headerRowIdx + 1; r < aoa.length; r++) {
+    const row = {};
+    let hasAnyValue = false;
+    headers.forEach((h, ci) => {
+      const v = aoa[r][ci];
+      row[h] = (v === null || v === undefined) ? null : String(v).trim();
+      if (row[h] !== null && row[h] !== '') hasAnyValue = true;
+    });
+    if (hasAnyValue) rows.push(row); // skip fully empty rows
+  }
+  state.rows = rows;
+
+  setProgress(85, 'Membangun preview…');
+  renderPreview(headers, rows, headerRowIdx);
+  setProgress(100, 'Selesai');
+
+  $('fi-status').className  = 'file-info-status status-ok';
+  $('fi-status').textContent = '✓ Berhasil dibaca';
+
+  setTimeout(() => {
+    removeClass('progress-wrap','show');
+    showToast(`${fmtNum(rows.length)} baris · ${headers.length} kolom berhasil dibaca`, '✅');
+  }, 600);
+}
+
+// Detect actual header row (skip title/blank rows at top)
+function detectHeaderRow(aoa) {
+  for (let i = 0; i < Math.min(10, aoa.length); i++) {
+    const row = aoa[i];
+    if (!row) continue;
+    const nonEmpty = row.filter(c => c !== null && c !== undefined && String(c).trim() !== '');
+    if (nonEmpty.length >= 2) return i;
+  }
+  return 0;
+}
+
+function renderPreview(headers, rows, headerRowIdx) {
+  const card = $('card-preview');
+  card.style.display = 'block';
+
+  const extra = headerRowIdx > 0
+    ? `⚠️ ${headerRowIdx} baris awal dilewati (terdeteksi sebagai judul/metadata) · `
+    : '';
+  $('preview-subtitle').textContent =
+    `${extra}${fmtNum(rows.length)} baris · ${headers.length} kolom · Menampilkan 5 baris pertama`;
+
+  const preview5 = rows.slice(0, 5);
+
+  let html = `<table class="preview-table"><thead><tr>`;
+  headers.forEach(h => {
+    const type = guessColType(rows, h);
+    html += `<th>${escHtml(h)}<span class="col-type ${type.cls}">${type.label}</span></th>`;
+  });
+  html += `</tr></thead><tbody>`;
+
+  preview5.forEach(row => {
+    html += '<tr>';
+    headers.forEach(h => {
+      const v = row[h];
+      let cls = '';
+      if (v === null || v === '') cls = 'cell-null';
+      html += `<td class="${cls}">${v === null || v === '' ? '<i>kosong</i>' : escHtml(v)}</td>`;
+    });
+    html += '</tr>';
+  });
+
+  html += '</tbody></table>';
+  $('preview-wrap').innerHTML = html;
+}
+
+function guessColType(rows, col) {
+  const vals = rows.map(r => r[col]).filter(v => v !== null && v !== '');
+  if (!vals.length) return { cls: 'str', label: 'kosong' };
+  const numCount  = vals.filter(v => isNumeric(v)).length;
+  const dateCount = vals.filter(v => isDateLike(v)).length;
+  const ratio     = numCount / vals.length;
+  if (dateCount / vals.length > 0.7) return { cls: 'date', label: 'tanggal' };
+  if (ratio > 0.9) return { cls: 'num', label: 'numerik' };
+  if (ratio > 0.3) return { cls: 'mix', label: 'campuran' };
+  return { cls: 'str', label: 'teks' };
+}
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
+
+// ═══════════════════════════════════════════════════
+//  DIAGNOSTIK ENGINE
+// ═══════════════════════════════════════════════════
+function runDiagnostic() {
+  if (!state.rows.length) { showToast('Data belum dimuat', '⚠️'); return; }
+
+  const findings = [];
+  const { headers, rows, rawData } = state;
+  const N = rows.length;
+
+  // ── 1. STRUKTUR FILE ────────────────────────────
+  // 1a. Header row tidak di baris pertama
+  const headerRowIdx = detectHeaderRow(rawData);
+  if (headerRowIdx > 0) {
+    findings.push({
+      level: 'warning', icon: '⚠️',
+      title: `Header data tidak dimulai dari baris pertama`,
+      desc: `StatLab mendeteksi header data ada di baris ke-<code>${headerRowIdx + 1}</code>. Ada <code>${headerRowIdx}</code> baris di atasnya yang terdeteksi sebagai judul atau metadata. Baris-baris ini telah dilewati secara otomatis, namun pastikan StatLab membaca kolom dengan benar.`,
+      meta: `Baris dilewati: ${headerRowIdx}`,
+      section: 'struktur',
+    });
+  }
+
+  // 1b. Kolom tanpa nama
+  const unnamedCols = headers.filter(h => /^Kolom_\d+$/.test(h));
+  if (unnamedCols.length > 0) {
+    findings.push({
+      level: 'fatal', icon: '🔴',
+      title: `${unnamedCols.length} kolom tidak memiliki nama`,
+      desc: `Ditemukan kolom tanpa label: <code>${unnamedCols.join(', ')}</code>. Ini biasanya terjadi karena header di Excel memiliki sel kosong atau hasil merge cell yang tidak sempurna. Kolom tanpa nama tidak dapat diidentifikasi dalam analisis.`,
+      meta: `Kolom bermasalah: ${unnamedCols.join(', ')}`,
+      section: 'struktur',
+    });
+  }
+
+  // 1c. Nama kolom duplikat
+  const dupCols = headers.filter((h, i) => headers.indexOf(h) !== i);
+  if (dupCols.length > 0) {
+    findings.push({
+      level: 'fatal', icon: '🔴',
+      title: `Nama kolom duplikat ditemukan`,
+      desc: `Kolom dengan nama sama: <code>${[...new Set(dupCols)].join(', ')}</code>. Nama kolom harus unik agar setiap variabel dapat dibedakan dengan benar dalam analisis.`,
+      section: 'struktur',
+    });
+  }
+
+  // 1d. Baris total/summary di bawah (deteksi kata kunci)
+  const summaryKeywords = ['total','jumlah','rata-rata','mean','average','sum','rerata','grand'];
+  const lastRows = rows.slice(-5);
+  let summaryFound = false;
+  lastRows.forEach((row, ri) => {
+    if (summaryFound) return;
+    const vals = Object.values(row).map(v => v ? String(v).toLowerCase() : '');
+    if (vals.some(v => summaryKeywords.some(kw => v.includes(kw)))) {
+      summaryFound = true;
+      findings.push({
+        level: 'warning', icon: '⚠️',
+        title: 'Kemungkinan baris ringkasan (total/rata-rata) ditemukan di bagian bawah data',
+        desc: `Di antara 5 baris terakhir, terdeteksi baris yang mengandung kata seperti <code>total</code>, <code>jumlah</code>, atau <code>rata-rata</code>. Jika baris ini bukan data responden, hapus sebelum analisis karena akan memengaruhi hasil statistik.`,
+        meta: `Ditemukan di sekitar baris ke-${N - (4 - ri)}`,
+        section: 'struktur',
+      });
+    }
+  });
+
+  // 1e. Jumlah sampel sangat kecil
+  if (N < 30) {
+    findings.push({
+      level: 'warning', icon: '⚠️',
+      title: `Jumlah sampel sangat kecil (n = ${N})`,
+      desc: `Umumnya analisis statistik inferensial membutuhkan minimal 30 observasi. Dengan sampel sekecil ini, banyak uji statistik kehilangan kekuatan (statistical power) dan hasil menjadi tidak stabil. Beberapa uji mungkin tidak valid dijalankan.`,
+      section: 'struktur',
+    });
+  } else if (N < 50) {
+    findings.push({
+      level: 'info', icon: '🔵',
+      title: `Jumlah sampel tergolong kecil (n = ${N})`,
+      desc: `Sampel di bawah 50 masih bisa dianalisis, namun beberapa metode (seperti regresi berganda dengan banyak prediktor) membutuhkan sampel lebih besar. Perhatikan rekomendasi minimal sampel saat memilih alat uji.`,
+      section: 'struktur',
+    });
+  } else {
+    findings.push({
+      level: 'ok', icon: '✅',
+      title: `Jumlah sampel memadai (n = ${N})`,
+      desc: `Dataset memiliki ${fmtNum(N)} observasi, cukup untuk menjalankan sebagian besar analisis statistik inferensial.`,
+      section: 'struktur',
+    });
+  }
+
+  // ── 2. ANALISIS PER KOLOM ────────────────────────
+  const colMeta = headers.map(h => analyzeColumn(rows, h, N));
+  state.colMeta = colMeta;
+
+  // 2a. Missing values
+  const colsWithMissing = colMeta.filter(c => c.missingCount > 0);
+  const totalMissing    = colMeta.reduce((s, c) => s + c.missingCount, 0);
+  const totalCells      = N * headers.length;
+
+  if (totalMissing === 0) {
+    findings.push({
+      level: 'ok', icon: '✅',
+      title: 'Tidak ada missing values ditemukan',
+      desc: 'Seluruh sel data terisi. Tidak ada nilai yang kosong.',
+      section: 'kualitas',
+    });
+  } else {
+    const pct = ((totalMissing / totalCells) * 100).toFixed(1);
+    const lvl = parseFloat(pct) > 10 ? 'fatal' : parseFloat(pct) > 5 ? 'warning' : 'info';
+    const ico = lvl === 'fatal' ? '🔴' : lvl === 'warning' ? '⚠️' : '🔵';
+    const affected = colsWithMissing.map(c =>
+      `<code>${c.name}</code> (${c.missingCount} kosong, ${c.missingPct}%)`).join(', ');
+    findings.push({
+      level: lvl, icon: ico,
+      title: `Missing values: ${fmtNum(totalMissing)} sel kosong dari ${fmtNum(totalCells)} total (${pct}%)`,
+      desc: `Kolom yang memiliki missing values: ${affected}. ${
+        parseFloat(pct) > 10
+          ? 'Persentase ini tergolong tinggi dan dapat memengaruhi validitas hasil analisis secara signifikan.'
+          : 'Perhatikan pola missing values — apakah acak atau ada pola tertentu.'
+      }`,
+      meta: `${colsWithMissing.length} dari ${headers.length} kolom terpengaruh`,
+      section: 'kualitas',
+    });
+  }
+
+  // 2b. Kolom campuran tipe data (seharusnya numerik tapi ada teks)
+  const mixedCols = colMeta.filter(c => c.type === 'mix');
+  if (mixedCols.length > 0) {
+    mixedCols.forEach(c => {
+      findings.push({
+        level: 'fatal', icon: '🔴',
+        title: `Kolom "${c.name}" berisi campuran angka dan teks`,
+        desc: `Kolom ini seharusnya numerik, namun ditemukan nilai non-angka: <code>${c.nonNumericSamples.slice(0,5).join(', ')}</code>. Ini biasanya terjadi karena input manual yang tidak konsisten (misalnya "tidak tahu", "N/A", tanda strip). Kolom campuran tidak bisa dianalisis secara statistik.`,
+        meta: `${c.numericCount} numerik · ${c.nonNumericCount} non-numerik dari ${N} baris`,
+        section: 'tipe-data',
+      });
+    });
+  }
+
+  // 2c. Kolom numerik tapi ada nilai di luar rentang wajar (Likert)
+  const likertCols = colMeta.filter(c => c.type === 'num' && c.isLikertCandidate);
+  likertCols.forEach(c => {
+    if (c.likertOutOfRange.length > 0) {
+      findings.push({
+        level: 'fatal', icon: '🔴',
+        title: `Kolom "${c.name}" diduga skala Likert tapi ada nilai di luar rentang`,
+        desc: `Kolom ini berisi nilai antara ${c.min}–${c.max} dengan mayoritas nilai 1–5 (atau 1–7). Namun ditemukan nilai tidak wajar: <code>${c.likertOutOfRange.join(', ')}</code>. Kemungkinan typo saat input data (misalnya menekan tombol dua kali: 11, 22, 55).`,
+        meta: `Nilai tidak wajar: ${c.likertOutOfRange.join(', ')}`,
+        section: 'tipe-data',
+      });
+    }
+  });
+
+  // 2d. Kolom kategorik dengan inkonsistensi format
+  const strCols = colMeta.filter(c => c.type === 'str' && c.uniqueCount <= 20);
+  strCols.forEach(c => {
+    if (c.hasCapitalizationIssue) {
+      findings.push({
+        level: 'warning', icon: '⚠️',
+        title: `Kolom "${c.name}" memiliki inkonsistensi huruf kapital`,
+        desc: `Nilai yang tampak sama muncul dalam format berbeda, misalnya: <code>${c.capSamples.join(', ')}</code>. Ini akan terbaca sebagai kategori berbeda oleh sistem. Contoh: "Laki-laki" dan "laki-laki" dihitung sebagai dua grup yang berbeda.`,
+        section: 'tipe-data',
+      });
+    }
+    if (c.hasSpaceIssue) {
+      findings.push({
+        level: 'warning', icon: '⚠️',
+        title: `Kolom "${c.name}" memiliki spasi tersembunyi pada beberapa nilai`,
+        desc: `Beberapa nilai memiliki spasi di awal atau akhir yang tidak terlihat secara visual tapi menyebabkan nilai yang sama terbaca berbeda oleh sistem.`,
+        section: 'tipe-data',
+      });
+    }
+  });
+
+  // 2e. Kolom dengan nilai angka format teks (Rp, %, satuan)
+  const fmtCols = colMeta.filter(c => c.hasFormattedNumbers);
+  fmtCols.forEach(c => {
+    findings.push({
+      level: 'fatal', icon: '🔴',
+      title: `Kolom "${c.name}" berisi angka berformat teks (Rp, %, satuan)`,
+      desc: `Ditemukan nilai seperti <code>${c.formattedSamples.join(', ')}</code>. Angka yang ditulis dengan prefix/suffix (Rp, %, "tahun", "juta", dll) tidak bisa langsung dihitung secara statistik. Angka perlu dibersihkan menjadi nilai murni numerik.`,
+      section: 'tipe-data',
+    });
+  });
+
+  // 2f. Baris duplikat
+  const rowStrings = rows.map(r => JSON.stringify(r));
+  const dupRows    = rowStrings.length - new Set(rowStrings).size;
+  if (dupRows > 0) {
+    findings.push({
+      level: 'warning', icon: '⚠️',
+      title: `${dupRows} baris duplikat ditemukan`,
+      desc: `Ada ${dupRows} baris yang persis identik dengan baris lain. Ini kemungkinan input data ganda. Baris duplikat akan menggandakan pengaruh responden tersebut dalam analisis.`,
+      section: 'kualitas',
+    });
+  } else {
+    findings.push({
+      level: 'ok', icon: '✅',
+      title: 'Tidak ada baris duplikat',
+      desc: 'Setiap baris data adalah unik — tidak ada data yang diinput dua kali.',
+      section: 'kualitas',
+    });
+  }
+
+  // 2g. Outlier per kolom numerik
+  const numColsForOutlier = colMeta.filter(c => c.type === 'num' && c.values.length >= 5);
+  let outlierColCount = 0;
+  numColsForOutlier.forEach(c => {
+    if (c.outliers.length > 0) {
+      outlierColCount++;
+      const severity = c.outliers.length > 5 ? 'fatal' : 'warning';
+      findings.push({
+        level: severity, icon: severity === 'fatal' ? '🔴' : '⚠️',
+        title: `Outlier pada kolom "${c.name}": ${c.outliers.length} nilai ekstrem`,
+        desc: `Nilai-nilai ini berada jauh di luar distribusi normal data (> 3 standar deviasi atau metode IQR). Nilai outlier: <code>${c.outliers.slice(0,8).join(', ')}${c.outliers.length > 8 ? ', ...' : ''}</code>. Perlu diperiksa — apakah ini kesalahan input atau kasus yang memang ekstrem?`,
+        meta: `Min: ${c.min} · Max: ${c.max} · Mean: ${c.mean.toFixed(2)} · Std: ${c.std.toFixed(2)}`,
+        section: 'kualitas',
+      });
+    }
+  });
+  if (outlierColCount === 0 && numColsForOutlier.length > 0) {
+    findings.push({
+      level: 'ok', icon: '✅',
+      title: 'Tidak ada outlier ekstrem terdeteksi',
+      desc: 'Semua nilai pada kolom numerik berada dalam rentang yang wajar secara statistik.',
+      section: 'kualitas',
+    });
+  }
+
+  // 2h. Kolom tanpa variasi (semua nilai sama)
+  colMeta.filter(c => c.type === 'num').forEach(c => {
+    if (c.std === 0) {
+      findings.push({
+        level: 'fatal', icon: '🔴',
+        title: `Kolom "${c.name}" tidak memiliki variasi (semua nilai = ${c.mean})`,
+        desc: `Seluruh ${N} baris memiliki nilai yang sama persis. Variabel tanpa variasi tidak dapat digunakan dalam analisis statistik apapun karena korelasi dan regresi tidak bisa dihitung.`,
+        section: 'kualitas',
+      });
+    }
+  });
+
+  // 2i. Common Method Bias proxy (Likert semua kolom sangat mirip)
+  const likertNumCols = colMeta.filter(c => c.type === 'num' && c.isLikertCandidate && c.values.length > 0);
+  if (likertNumCols.length >= 5) {
+    const means = likertNumCols.map(c => c.mean);
+    const meanOfMeans = means.reduce((a,b)=>a+b,0)/means.length;
+    const allClose = means.every(m => Math.abs(m - meanOfMeans) < 0.4);
+    if (allClose) {
+      findings.push({
+        level: 'info', icon: '🔵',
+        title: 'Indikasi response bias: rata-rata antar kolom Likert sangat seragam',
+        desc: `Rata-rata dari ${likertNumCols.length} kolom Likert sangat berdekatan (semua sekitar ${meanOfMeans.toFixed(2)}). Ini bisa mengindikasikan bahwa sebagian responden menjawab secara asal (central tendency bias) atau ada acquiescence bias. Perlu dipertimbangkan dalam interpretasi hasil.`,
+        section: 'kualitas',
+      });
+    }
+  }
+
+  state.findings = findings;
+  renderDiagnostic(findings, colMeta, N, headers.length);
+}
+
+// ─── Analisis satu kolom ─────────────────────────
+function analyzeColumn(rows, colName, N) {
+  const vals    = rows.map(r => r[colName]);
+  const nonNull = vals.filter(v => v !== null && v !== '');
+  const missing = vals.length - nonNull.length;
+
+  const numericVals    = nonNull.filter(v => isNumeric(v)).map(Number);
+  const nonNumericVals = nonNull.filter(v => !isNumeric(v));
+
+  let type = 'str';
+  if (nonNull.length === 0) type = 'str';
+  else if (numericVals.length / nonNull.length > 0.9) type = 'num';
+  else if (numericVals.length / nonNull.length > 0.1) type = 'mix';
+  else type = 'str';
+
+  // Numeric stats
+  let mean=0, std=0, min=0, max=0, outliers=[], isLikertCandidate=false, likertOutOfRange=[];
+  if (type === 'num' && numericVals.length > 0) {
+    mean = numericVals.reduce((a,b)=>a+b,0) / numericVals.length;
+    std  = Math.sqrt(numericVals.reduce((a,b)=>a+(b-mean)**2,0) / numericVals.length);
+    min  = Math.min(...numericVals);
+    max  = Math.max(...numericVals);
+    // Outlier: Z-score > 3
+    outliers = numericVals.filter(v => Math.abs((v-mean)/(std||1)) > 3);
+    // Likert candidate: most values 1-5 or 1-7, integers
+    const allInt = numericVals.every(v => Number.isInteger(v));
+    const pct15  = numericVals.filter(v => v>=1&&v<=5).length / numericVals.length;
+    const pct17  = numericVals.filter(v => v>=1&&v<=7).length / numericVals.length;
+    if (allInt && (pct15 > 0.85 || pct17 > 0.85)) {
+      isLikertCandidate = true;
+      const maxLikert = pct17 > pct15 ? 7 : 5;
+      likertOutOfRange = [...new Set(numericVals.filter(v => v<1||v>maxLikert))];
+    }
+  }
+
+  // String stats
+  let uniqueCount=0, hasCapitalizationIssue=false, capSamples=[], hasSpaceIssue=false;
+  if (type === 'str') {
+    const uniqueVals = [...new Set(nonNull.map(v=>v.toLowerCase().trim()))];
+    uniqueCount = uniqueVals.length;
+    // Check capitalization
+    const grouped = {};
+    nonNull.forEach(v => {
+      const k = v.toLowerCase().trim();
+      if (!grouped[k]) grouped[k] = new Set();
+      grouped[k].add(v.trim());
+    });
+    const inconsistent = Object.values(grouped).filter(s => s.size > 1);
+    if (inconsistent.length > 0) {
+      hasCapitalizationIssue = true;
+      capSamples = inconsistent[0] ? [...inconsistent[0]] : [];
+    }
+    // Check spaces
+    hasSpaceIssue = nonNull.some(v => v !== v.trim());
+  }
+
+  // Formatted numbers (Rp, %, satuan)
+  const fmtPattern = /^(rp\.?\s*[\d.,]+|[\d.,]+\s*%|[\d.,]+\s*(juta|ribu|tahun|th|bulan|hari|jam|org|orang))$/i;
+  const formattedVals = nonNull.filter(v => fmtPattern.test(String(v).trim()));
+  const hasFormattedNumbers = formattedVals.length / (nonNull.length || 1) > 0.3;
+
+  return {
+    name: colName,
+    type,
+    missingCount: missing,
+    missingPct: ((missing/N)*100).toFixed(1),
+    values: numericVals,
+    numericCount: numericVals.length,
+    nonNumericCount: nonNumericVals.length,
+    nonNumericSamples: [...new Set(nonNumericVals)].slice(0,5),
+    mean, std, min, max, outliers,
+    isLikertCandidate, likertOutOfRange,
+    uniqueCount,
+    hasCapitalizationIssue, capSamples, hasSpaceIssue,
+    hasFormattedNumbers,
+    formattedSamples: formattedVals.slice(0,3),
+  };
+}
+
+// ─── Render hasil diagnostik ─────────────────────
+function renderDiagnostic(findings, colMeta, N, numCols) {
+  const container = $('diag-result');
+  container.style.display = 'block';
+
+  const fatalCount   = findings.filter(f=>f.level==='fatal').length;
+  const warnCount    = findings.filter(f=>f.level==='warning').length;
+  const infoCount    = findings.filter(f=>f.level==='info').length;
+  const okCount      = findings.filter(f=>f.level==='ok').length;
+
+  const sections = {
+    struktur:   { label: 'Struktur File',     icon: '🗂️' },
+    'tipe-data':{ label: 'Tipe & Format Data',icon: '🔤' },
+    kualitas:   { label: 'Kualitas Data',     icon: '🔍' },
+  };
+
+  let html = `
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon ${fatalCount>0?'red':warnCount>0?'yellow':'green'}">
+        ${fatalCount>0?'🔴':warnCount>0?'⚠️':'✅'}
+      </div>
+      <div>
+        <div class="card-title">Hasil Diagnostik Data</div>
+        <div class="card-subtitle">${fmtNum(N)} baris · ${numCols} kolom · ${findings.length} temuan diidentifikasi</div>
+      </div>
+    </div>
+
+    <div class="summary-strip">
+      ${fatalCount>0?`<div class="sum-badge fatal">🔴 <span class="sum-num">${fatalCount}</span> Fatal</div>`:''}
+      ${warnCount>0?`<div class="sum-badge warning">⚠️ <span class="sum-num">${warnCount}</span> Peringatan</div>`:''}
+      ${infoCount>0?`<div class="sum-badge info">🔵 <span class="sum-num">${infoCount}</span> Informasi</div>`:''}
+      ${okCount>0?`<div class="sum-badge ok">✅ <span class="sum-num">${okCount}</span> Lolos</div>`:''}
+    </div>
+  `;
+
+  // Render per section
+  Object.entries(sections).forEach(([key, meta]) => {
+    const sFindings = findings.filter(f => f.section === key);
+    if (!sFindings.length) return;
+    html += `
+    <div class="diag-section">
+      <div class="diag-section-title">${meta.icon} ${meta.label}</div>
+    `;
+    sFindings.forEach((f, i) => {
+      html += `
+      <div class="finding ${f.level}" style="animation-delay:${i*0.05}s">
+        <div class="finding-icon">${f.icon}</div>
+        <div class="finding-body">
+          <div class="finding-title">${f.title}</div>
+          <div class="finding-desc">${f.desc}</div>
+          ${f.meta?`<div class="finding-meta">${f.meta}</div>`:''}
+        </div>
+      </div>`;
+    });
+    html += `</div>`;
+  });
+
+  // Column detail table
+  html += `
+    <div class="diag-section">
+      <div class="diag-section-title">📊 Ringkasan per Kolom</div>
+      <div style="overflow-x:auto;border-radius:10px;border:1px solid var(--border);">
+        <table class="col-detail">
+          <thead>
+            <tr>
+              <th>Kolom</th>
+              <th>Tipe</th>
+              <th>Isi Valid</th>
+              <th>Missing</th>
+              <th>Outlier</th>
+              <th>Min</th>
+              <th>Max</th>
+              <th>Rata-rata</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+  `;
+
+  colMeta.forEach(c => {
+    const type = c.type === 'num' ? `<span class="col-type num">numerik</span>`
+               : c.type === 'mix' ? `<span class="col-type mix">campuran</span>`
+               : c.type === 'str' ? `<span class="col-type str">teks</span>`
+               : `<span class="col-type date">tanggal</span>`;
+
+    const missingColor = parseFloat(c.missingPct) > 10 ? 'var(--red)'
+                       : parseFloat(c.missingPct) > 0  ? 'var(--yellow)'
+                       : 'var(--green)';
+    const missingBar = `
+      <div class="missing-bar-wrap">
+        <div class="missing-bar-track">
+          <div class="missing-bar-fill" style="width:${c.missingPct}%;background:${missingColor}"></div>
+        </div>
+        <span class="missing-pct" style="color:${missingColor}">${c.missingPct}%</span>
+      </div>`;
+
+    const outlierBadge = c.outliers && c.outliers.length > 0
+      ? `<span style="color:var(--red);font-family:var(--mono);font-size:11px;">⚠ ${c.outliers.length}</span>`
+      : `<span style="color:var(--green);font-size:11px;">—</span>`;
+
+    const isOk = c.type !== 'mix' && parseFloat(c.missingPct) <= 5
+              && (!c.outliers || c.outliers.length === 0)
+              && !c.hasFormattedNumbers;
+    const statusDot = isOk
+      ? `<span style="color:var(--green);font-size:12px;">✅</span>`
+      : `<span style="color:var(--red);font-size:12px;">⚠️</span>`;
+
+    html += `
+      <tr>
+        <td style="font-family:var(--mono);font-size:12px;font-weight:500;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(c.name)}">${escHtml(c.name)}</td>
+        <td>${type}</td>
+        <td style="font-family:var(--mono);font-size:12px;">${N - c.missingCount}</td>
+        <td>${missingBar}</td>
+        <td>${outlierBadge}</td>
+        <td style="font-family:var(--mono);font-size:12px;color:var(--text2)">${c.type==='num'?c.min:'—'}</td>
+        <td style="font-family:var(--mono);font-size:12px;color:var(--text2)">${c.type==='num'?c.max:'—'}</td>
+        <td style="font-family:var(--mono);font-size:12px;color:var(--text2)">${c.type==='num'?c.mean.toFixed(2):'—'}</td>
+        <td style="text-align:center">${statusDot}</td>
+      </tr>`;
+  });
+
+  html += `</tbody></table></div></div>`;
+
+  // Gate
+  const canProceed = fatalCount === 0;
+  html += `
+    <div class="gate">
+      <div class="gate-text">
+        <div class="gate-title">${canProceed
+          ? '✅ Data siap untuk tahap berikutnya'
+          : `🔴 ${fatalCount} masalah fatal perlu diperbaiki terlebih dahulu`
+        }</div>
+        <div class="gate-desc">${canProceed
+          ? `Tidak ada masalah fatal ditemukan. ${warnCount > 0 ? `Ada ${warnCount} peringatan yang perlu kamu pertimbangkan, namun analisis bisa dilanjutkan.` : 'Data terlihat bersih dan siap dianalisis.'} Lanjutkan ke Tahap 2: Uji Validitas & Reliabilitas.`
+          : `Perbaiki ${fatalCount} masalah fatal di file Excel-mu, kemudian upload ulang. Masalah fatal akan membuat hasil analisis tidak valid atau tidak bisa dijalankan.`
+        }</div>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <button class="btn btn-ghost" onclick="resetUpload()">↩ Upload Ulang</button>
+        ${canProceed
+          ? `<button class="btn btn-primary" onclick="goToStep2()">Lanjut: Validitas & Reliabilitas →</button>`
+          : `<button class="btn btn-primary" disabled>Perbaiki data dulu</button>`
+        }
+      </div>
+    </div>
+  </div>`;
+
+  container.innerHTML = html;
+  container.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// ═══════════════════════════════════════════════════
+//  NAVIGATION
+// ═══════════════════════════════════════════════════
+function resetUpload() {
+  $('file-input').value = '';
+  removeClass('file-info','show');
+  removeClass('progress-wrap','show');
+  $('card-sheet').style.display  = 'none';
+  $('card-preview').style.display = 'none';
+  $('diag-result').style.display = 'none';
+  $('diag-result').innerHTML = '';
+  Object.assign(state, { rawFile:null, workbook:null, activeSheet:null, rawData:[], headers:[], rows:[], colMeta:[], findings:[] });
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// goToStep2 moved to Sprint 2 block
+
+function setStep(n) {
+  [1,2,3,4].forEach(i => {
+    const el = $(`step-${i}`);
+    el.classList.remove('active','done');
+    if (i < n) el.classList.add('done');
+    if (i === n) el.classList.add('active');
+  });
+}
+
+// ── Global error handler ──
+window.addEventListener('error', function(e) {
+  console.error('Global error:', e.error);
+  showToast('Error: ' + (e.message||'Unknown error'), '❌', 6000);
+  return false;
+});
+window.addEventListener('unhandledrejection', function(e) {
+  console.error('Unhandled promise rejection:', e.reason);
+  showToast('Error: ' + (e.reason?.message || String(e.reason)), '❌', 5000);
+});
+
+</script>
+</body>
+</html>
